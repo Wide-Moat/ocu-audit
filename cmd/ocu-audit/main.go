@@ -28,7 +28,6 @@ import (
 	"github.com/Wide-Moat/ocu-audit/internal/ingest"
 	"github.com/Wide-Moat/ocu-audit/internal/signer"
 	"github.com/Wide-Moat/ocu-audit/internal/store"
-	"github.com/Wide-Moat/ocu-audit/internal/wal"
 )
 
 // main is a thin shell: every exit path funnels through run so the deferred WAL
@@ -61,23 +60,35 @@ func run() error {
 		return errors.New("-server-cert, -server-key, -client-ca and -sign-key are required")
 	}
 
-	w, err := wal.Open(*walPath)
+	// Recover, never merely open: the store rebuilds chain tips, sequence
+	// tips, dedupe, and the Merkle accumulator from the WAL's committed
+	// records, verifying every chain link before serving. A restart therefore
+	// serves the same head the previous generation served, and a corrupt or
+	// tampered WAL refuses boot (fail-closed) instead of re-anchoring the next
+	// admit on genesis and leaving the WAL permanently unverifiable.
+	st, err := store.Recover(*walPath, store.SystemClock{})
 	if err != nil {
-		return fmt.Errorf("open wal: %w", err)
+		return fmt.Errorf("recover wal: %w", err)
 	}
-	// Now that run() returns rather than log.Fatalf-ing, this defer actually
-	// fires -- and a WAL close that fails means buffered records may not be on
-	// stable storage, which is exactly what this component must not swallow.
+	// A store close that fails means buffered records may not be on stable
+	// storage, which is exactly what this component must not swallow.
 	defer func() {
-		if cerr := w.Close(); cerr != nil {
-			log.Printf("ocu-audit: wal close: %v", cerr)
+		if cerr := st.Close(); cerr != nil {
+			log.Printf("ocu-audit: store close: %v", cerr)
 		}
 	}()
+	log.Printf("ocu-audit: recovered %d committed records from %s", len(st.Records()), *walPath)
 
-	st := store.New(w, store.SystemClock{})
 	sgn, err := signer.LoadPrivateKey(*signKeyFile)
 	if err != nil {
 		return fmt.Errorf("load sign key: %w", err)
+	}
+	// Sign and write a fresh head IMMEDIATELY after recovery: without this, a
+	// restart leaves the previous generation's head (or a genesis head) on
+	// disk for up to one ticker interval, and the independent verifier
+	// correctly fails the freshness gate in that window.
+	if err := dumpHead(st, sgn, *headOut); err != nil {
+		return fmt.Errorf("initial head dump: %w", err)
 	}
 
 	cert, err := tls.LoadX509KeyPair(*serverCert, *serverKey)

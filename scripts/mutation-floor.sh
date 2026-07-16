@@ -24,12 +24,20 @@
 # unparsable summary), fails the job.
 set -euo pipefail
 
-# Measured local baseline for internal/chain: 0.77 (17/22 killed) with the
-# known-answer + input-sensitivity tests. Floor set below that with headroom so
-# a real regression reds while measurement noise does not.
-FLOOR="${MUTATION_FLOOR:-0.70}"
-PACKAGES=(
-  "github.com/Wide-Moat/ocu-audit/internal/chain"
+# Per-package armed floors, each set below its measured local baseline with
+# headroom so a real regression reds while measurement noise does not.
+# - internal/chain: measured 0.77 (17/22 killed) with the known-answer +
+#   input-sensitivity tests; floor 0.70.
+# - internal/store: measured 0.64 (47/73 killed) with the restart-recovery
+#   suite (recover_test.go) added; floor 0.55. Every recovery GUARD mutant
+#   (skip chain verification, skip a state-map rebuild, skip the record list,
+#   mis-order the leaves) is killed; the survivors are the unreachable
+#   AppendLeaf error branch, one equivalent mutant, and pre-existing
+#   error-branch bookkeeping outside the recovery path.
+# MUTATION_FLOOR overrides every per-package floor when set (CI knob).
+PACKAGES_WITH_FLOORS=(
+  "github.com/Wide-Moat/ocu-audit/internal/chain:0.70"
+  "github.com/Wide-Moat/ocu-audit/internal/store:0.55"
 )
 
 # Per-mutant hard timeout so a hanging mutant is killed, not run to the job cap.
@@ -38,26 +46,31 @@ export MUTATE_TIMEOUT="${MUTATE_TIMEOUT:-60}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-rc=0
-go-mutesting "${PACKAGES[@]}" >"$tmp" 2>&1 || rc=$?
+for entry in "${PACKAGES_WITH_FLOORS[@]}"; do
+  pkg="${entry%:*}"
+  floor="${MUTATION_FLOOR:-${entry##*:}}"
 
-cat "$tmp"
+  rc=0
+  go-mutesting "$pkg" >"$tmp" 2>&1 || rc=$?
 
-# Fail-closed: an errored run (tool crash, compile failure) is never a pass.
-if [ "$rc" -ne 0 ] && ! grep -qE '^The mutation score is' "$tmp"; then
-  echo "::error::go-mutesting errored (rc=$rc) without emitting a score; failing closed"
-  exit 1
-fi
+  cat "$tmp"
 
-score="$(grep -oE 'The mutation score is [0-9.]+' "$tmp" | grep -oE '[0-9.]+' | tail -1 || true)"
-if [ -z "$score" ]; then
-  echo "::error::could not parse a mutation score from go-mutesting output; failing closed"
-  exit 1
-fi
+  # Fail-closed: an errored run (tool crash, compile failure) is never a pass.
+  if [ "$rc" -ne 0 ] && ! grep -qE '^The mutation score is' "$tmp"; then
+    echo "::error::go-mutesting errored (rc=$rc) on $pkg without emitting a score; failing closed"
+    exit 1
+  fi
 
-echo "mutation score: $score (floor $FLOOR)"
-awk -v s="$score" -v f="$FLOOR" 'BEGIN { exit !(s+0 >= f+0) }' || {
-  echo "::error::mutation score $score is below the floor $FLOOR"
-  exit 1
-}
+  score="$(grep -oE 'The mutation score is [0-9.]+' "$tmp" | grep -oE '[0-9.]+' | tail -1 || true)"
+  if [ -z "$score" ]; then
+    echo "::error::could not parse a mutation score for $pkg from go-mutesting output; failing closed"
+    exit 1
+  fi
+
+  echo "mutation score for $pkg: $score (floor $floor)"
+  awk -v s="$score" -v f="$floor" 'BEGIN { exit !(s+0 >= f+0) }' || {
+    echo "::error::mutation score $score for $pkg is below the floor $floor"
+    exit 1
+  }
+done
 echo "mutation floor OK"
