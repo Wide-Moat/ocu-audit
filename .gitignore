@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+
+# Private planning artefacts - local only.
+.planning/
+
+# OS / editor.
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Compiled binaries (CI/release build them; a local build must not enter the
+# tree).
+/ocu-audit
+/ocu-audit-verify
+*.bin
+
+# Runtime state produced by the service; never source.
+*.wal
+audit-head.json
+pubkey.hex
+
+# Property-test (rapid) failure corpus - regenerated on every failing run.
+testdata/rapid/
+**/testdata/rapid/
+
+# Coverage profiles.
+cover.out
+cover.txt
+*.coverprofile
+
+# Python venv / caches (helper scripts only).
+__pycache__/
+*.pyc
+.venv/
+
+# Local-only Claude Code instructions.
+CLAUDE.local.md
+
+# go-mutesting run artifacts.
+report.json

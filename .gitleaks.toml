@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+
+# gitleaks configuration for the ocu-audit repository.
+#
+# A gitleaks config auto-loaded from the repository root REPLACES the built-in
+# ruleset unless it explicitly extends it. Without the [extend] block below, the
+# scanner would run with ZERO detection rules - every scan would report "no
+# leaks found" no matter what was committed (a silently vacuous, always-green
+# secrets gate). [extend].useDefault pulls in the full built-in ruleset first.
+[extend]
+  # Load the built-in gitleaks ruleset. This is load-bearing: the CI secrets
+  # gate (.github/workflows/security.yml) runs `gitleaks detect` with no
+  # --config flag, so this root file is auto-detected and, absent useDefault,
+  # would substitute emptiness for the default rules.
+  useDefault = true

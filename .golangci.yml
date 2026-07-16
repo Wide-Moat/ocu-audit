@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# golangci-lint configuration for the ocu-audit fan-in service. It complements
+# the standalone CI gates (gofmt, go vet, staticcheck, govulncheck) with the
+# security/correctness set below (gosec, errorlint, bodyclose, ...). Schema is
+# golangci-lint v2. See https://golangci-lint.run/ for the reference.
+version: "2"
+
+run:
+  timeout: 5m
+  # Lint tests too: the keystone and red-probe suites guard the chain,
+  # merkle, signer, and ingest invariants and are first-class code.
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+    - staticcheck
+    - gosec
+    - errorlint
+    - bodyclose
+    - copyloopvar
+    - unconvert
+    - unparam
+    - nakedret
+    - prealloc
+    - gocritic
+    - revive
+    - nolintlint
+
+  settings:
+    gosec:
+      excludes:
+        # G104 duplicates errcheck.
+        - G104
+        # G115 (integer overflow on conversion) fires on the length-prefix and
+        # hex encoders where len() and byte values are provably in range; the
+        # conversions are audited (bounded by maxRecord / maxBody) and rewriting
+        # them adds noise without changing behaviour.
+        - G115
+
+    errorlint:
+      comparison: true
+      asserts: true
+      errorf: false
+
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - io.WriteString
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+
+    nakedret:
+      max-func-lines: 30
+
+    revive:
+      severity: warning
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+
+  exclusions:
+    generated: lax
+    rules:
+      # The signer and chain packages call ed25519/sha256 with fixed inputs;
+      # gosec G401/G505 (weak crypto) does not apply to SHA-256 used for
+      # a Merkle log hash and hash-chain (RFC-6962), not for password hashing.
+      - linters: [gosec]
+        text: "G401|G505"
+        path: internal/(chain|merkletree)/
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

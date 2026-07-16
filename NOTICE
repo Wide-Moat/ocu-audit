@@ -1,0 +1,20 @@
+ocu-audit
+Copyright (c) 2025 Open Computer Use Contributors
+
+This product includes software developed as part of the Open Computer Use
+project, licensed under the Functional Source License, Version 1.1, Apache 2.0
+Future License (FSL-1.1-Apache-2.0). See LICENSE.
+
+Third-party dependencies and their licenses:
+
+  github.com/transparency-dev/merkle
+    Apache License 2.0
+    RFC-6962 Merkle log hasher and inclusion/consistency proofs.
+
+  pgregory.net/rapid
+    Mozilla Public License 2.0
+    Property-based testing (test-only dependency).
+
+Each dependency is admitted through the architecture repository's dependency
+policy (license gate + supply-chain gate). See the Bill of Materials in
+docs/architecture/manifesto/05-licensing-posture.md of the architecture repo.
