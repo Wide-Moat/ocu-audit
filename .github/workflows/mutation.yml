@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+name: mutation
+
+# Mutation testing measures assertion strength: it rewrites covered source and
+# re-runs the suite. A mutant the tests still pass on ("LIVED") is a line the
+# suite executes but does not assert on. This gate is split by whether the tool
+# can be honestly armed here:
+#
+#   gremlins (ADVISORY): the go-gremlins lens over the pure-logic guard
+#     packages. It stays advisory (continue-on-error) because it kills a mutant
+#     on a timeout it calibrates from one clean run, and the in-scope suites
+#     carry pgregory.net/rapid property tests that gremlins re-runs per mutant;
+#     real mutants land in the timed-out bucket, so a threshold there reds on
+#     runner timing, not on a real regression.
+#
+#   mutation-floor (ARMED): scripts/mutation-floor.sh runs go-mutesting over the
+#     hash-chain guard (internal/chain). go-mutesting resolves packages via
+#     `go list` and kills on real test PASS/FAIL with no timeout calibration, so
+#     its score is stable and armable. A score below the floor fails the job.
+#     Measured baseline: 0.77 (floor 0.70).
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly, 03:00 UTC. The armed go-mutesting floor runs here, NOT per-PR:
+    # a slow or hanging mutant costs a full hard-timeout window, tolerable
+    # nightly and hostile on the PR hot path. The per-PR freshness gate reds a
+    # PR if no green armed floor exists within the window, so the nightly floor
+    # cannot rot into a vacuous armed claim while PRs merge green.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gremlins:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: install go-gremlins (pinned)
+        # Pinned to the v0.6.0 release commit; go install resolves the immutable
+        # commit via the checksum database.
+        run: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
+      - name: gremlins unleash (advisory summary)
+        run: |
+          set -u
+          for pkg in ./internal/chain/ ./internal/ocsf/ ./internal/signer/; do
+            echo "::group::gremlins unleash $pkg"
+            gremlins unleash "$pkg" || echo "::warning::gremlins non-zero exit for $pkg (advisory)"
+            echo "::endgroup::"
+          done
+
+  mutation-floor:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: install go-mutesting (pinned)
+        # The avito-tech fork carries no semver tag, so pin the module pseudo-
+        # version (its immutable commit).
+        run: go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@v0.0.0-20251226130216-48d0401f00fb
+      - name: mutation-floor (go-mutesting, armed)
+        run: bash scripts/mutation-floor.sh
+
+  mutation-floor-freshness:
+    runs-on: ubuntu-latest
+    # Per-PR gate. The armed floor runs nightly (above); this gate reds a PR if
+    # no SUCCESSFUL schedule- or dispatch-triggered mutation-floor run exists
+    # within the freshness window, so the nightly result cannot rot into a
+    # vacuous armed claim.
+    #
+    # RATCHET (two-step, owner-gated): do NOT add this check to the
+    # branch-protection required set until the FIRST green scheduled/dispatched
+    # floor run exists - added earlier, it reds every PR from birth with no
+    # in-PR remedy. Step 1: merge this workflow, dispatch the floor, see it
+    # green. Step 2: add mutation-floor-freshness to the required set.
+    if: github.event_name == 'pull_request'
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: require a green armed mutation-floor within the window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FRESHNESS_DAYS: '7'
+        run: |
+          set -euo pipefail
+          runs_sched="$(gh run list --workflow mutation.yml --event schedule \
+            --status success --limit 10 \
+            --json conclusion,event,createdAt 2>/dev/null || echo '[]')"
+          runs_disp="$(gh run list --workflow mutation.yml --event workflow_dispatch \
+            --status success --limit 10 \
+            --json conclusion,event,createdAt 2>/dev/null || echo '[]')"
+          latest="$(printf '%s\n%s' "$runs_sched" "$runs_disp" \
+            | jq -rs 'add | [.[] | select(.conclusion=="success")] | sort_by(.createdAt) | last | .createdAt // empty')"
+          if [ -z "$latest" ]; then
+            echo "::error::no successful armed mutation-floor run found (schedule or workflow_dispatch). Bootstrap: dispatch the mutation workflow (Actions -> mutation -> Run workflow) and let the floor pass." >&2
+            exit 1
+          fi
+          now_epoch="$(date -u +%s)"
+          run_epoch="$(date -u -d "$latest" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$latest" +%s)"
+          age_days=$(( (now_epoch - run_epoch) / 86400 ))
+          echo "latest green armed mutation-floor: ${latest} (${age_days}d ago; window ${FRESHNESS_DAYS}d)"
+          if [ "$age_days" -gt "$FRESHNESS_DAYS" ]; then
+            echo "::error::the newest green armed mutation-floor run is ${age_days}d old, older than the ${FRESHNESS_DAYS}d freshness window. Triage the red nightlies, fix, then dispatch the workflow to re-arm." >&2
+            exit 1
+          fi
+          echo "mutation-floor freshness: OK"
