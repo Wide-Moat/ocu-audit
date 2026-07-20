@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Release build for the audit sink and its offline verifier. Two static builds
+# (CGO_ENABLED=0 -- the OCSF sink and the hash-chain verifier are pure Go), both
+# reproducible (trimpath + mod_timestamp), for linux amd64+arm64, with a
+# checksums file and a per-archive SBOM. The GitHub Release is published on a v*
+# tag. The release is gated behind the verify job in the release workflow;
+# goreleaser itself only builds and publishes the artifacts.
+
+version: 2
+
+project_name: ocu-audit
+
+builds:
+  - id: ocu-audit
+    main: ./cmd/ocu-audit
+    binary: ocu-audit
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Reproducible builds: stamp the binary's mtime from the commit, not the
+    # build clock, and strip debug info.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+  - id: ocu-audit-verify
+    main: ./cmd/ocu-audit-verify
+    binary: ocu-audit-verify
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  # One archive per (build, platform): the sink and the verifier ship as
+  # separate artifacts so a consumer can pull the offline verifier alone.
+  - id: ocu-audit
+    ids: [ocu-audit]
+    formats: [tar.gz]
+    name_template: >-
+      ocu-audit_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+  - id: ocu-audit-verify
+    ids: [ocu-audit-verify]
+    formats: [tar.gz]
+    name_template: >-
+      ocu-audit-verify_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - id: archive-sbom
+    artifacts: archive
+    # Pin the SBOM output name explicitly rather than inheriting goreleaser's
+    # default template. The release workflow signs SBOMs by globbing
+    # dist/*.sbom.json; making the name a value this file owns keeps that
+    # contract from silently breaking if an upstream default ever changes the
+    # extension (which, with nullglob in the sign step, would skip SBOM signing
+    # with no error). This matches the current default, so behaviour is unchanged.
+    documents:
+      - "{{ .ArtifactName }}.sbom.json"
+
+release:
+  github:
+    owner: Wide-Moat
+    name: ocu-audit
+  # Create the release as a DRAFT: goreleaser uploads the archives, checksums,
+  # and SBOMs but does not make the release public. The release workflow flips
+  # it to published only after keyless signing and SLSA provenance succeed, so
+  # a signing/attestation failure leaves the release unpublished rather than
+  # public-and-unsigned (fail-closed supply-chain guarantee).
+  draft: true
+  prerelease: auto
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: github

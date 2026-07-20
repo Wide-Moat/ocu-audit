@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Tag-triggered release. A tag push (v*) runs the test gate first; the publish
+# job runs only when the gate is green (needs: [gate]) -- a red or absent gate
+# structurally blocks the release. goreleaser runs via its official image pinned
+# by digest and emits an SBOM through its built-in syft integration inside that
+# image. Keyless Sigstore signing and SLSA build provenance run as native runner
+# steps AFTER goreleaser exits: goreleaser runs inside a docker-run container
+# with no OIDC environment, so Fulcio-bound steps must execute on the runner
+# where GitHub injects the OIDC token (granted by id-token: write on the publish
+# job only).
+#
+# The gate here is the Go correctness suite, NOT a broker/FUSE e2e harness: the
+# audit sink and its offline verifier are pure Go with no runtime device or
+# compose dependency. Static analysis and dependency/SBOM scanning of the tag
+# ref run in security.yml (its `on.push.tags: ['v*']` filter), so the release
+# ref is scanned independently; this workflow proves the build compiles and its
+# tests (including the race detector on the concurrency-bearing store) pass
+# before any artifact is signed.
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Least-privilege default for every job. The publish job raises its own scopes.
+permissions:
+  contents: read
+
+jobs:
+  # The test gate. The service is pure Go (the OCSF sink + hash-chain verifier);
+  # its correctness proof is the same suite CI runs on every PR -- the full test
+  # set plus the race detector over the concurrency-bearing store (ingest
+  # goroutines behind the store mutex + the head-cadence goroutine). NO
+  # continue-on-error and NO bypass: a red gate must block publish.
+  gate:
+    name: test gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: go test
+        run: go test ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  # Publish runs ONLY after the test gate is green. THE GATING EDGE.
+  publish:
+    name: publish release
+    needs: [gate]
+    runs-on: ubuntu-latest
+    # Minimal scopes, granted to THIS job only and only because it runs after
+    # the gate:
+    #   contents: write     -- goreleaser creates the Release + uploads assets;
+    #                         the native step attaches .cosign.bundle sidecars.
+    #   id-token: write     -- mints the workflow OIDC token used by keyless
+    #                         cosign (Fulcio/Rekor) and attest-build-provenance.
+    #   attestations: write -- lets attest-build-provenance write the SLSA
+    #                         provenance to the repo attestation store.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      # goreleaser via its official image pinned by digest (goreleaser:v2.16.0,
+      # bundles Go and syft). The release token is passed through so the GitHub
+      # Release is created on the tag. The -v bind mount makes the dist/
+      # artifacts visible on the runner workspace after the container exits, so
+      # the native signing/provenance steps below operate on them directly. No
+      # OIDC env enters this container. The release is created as a DRAFT
+      # (.goreleaser.yaml release.draft: true): assets are uploaded but the
+      # release is not public until the final step flips it, after signing +
+      # provenance succeed (fail-closed).
+      - name: goreleaser release
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}":/repo -w /repo \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            goreleaser/goreleaser@sha256:f5ce92e9a38fb9406ccd638b95e43402cd3f4c567cb677eb06af9fd161278c12 \
+            release --clean
+
+      # The goreleaser container runs as root (uid 0), so on a hosted Linux
+      # runner the bind-mounted dist/ and every artifact it writes are owned
+      # root:root. The native signing step below runs as the (non-root) runner
+      # user and must CREATE .cosign.bundle sidecars INSIDE dist/ -- which fails
+      # with permission denied against a root-owned directory, aborting the
+      # release before it is ever published. Reclaim ownership for the runner
+      # user so the native steps can write. The hosted runner user has
+      # passwordless sudo.
+      - name: Reclaim dist ownership from the goreleaser container
+        run: sudo chown -R "$(id -u):$(id -g)" dist
+
+      # Native runner step: install cosign. Pinned by SHA; the installer
+      # verifies its own pinned cosign release download. No long-lived key.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      # Native runner step: keyless-sign every released file. cosign reads the
+      # ambient ACTIONS_ID_TOKEN_REQUEST_URL/_TOKEN (present because id-token:
+      # write is on this job), exchanges the GitHub OIDC token at Fulcio for a
+      # short-lived cert bound to this workflow identity, and records the
+      # signature in the Rekor transparency log. cosign v3 defaults sign-blob to
+      # the bundle format, which requires --bundle. Emit one self-contained
+      # .cosign.bundle per file (signature + cert + inclusion proof in one
+      # verifiable artifact). sign-blob (not sign) is correct: these are blobs,
+      # not OCI images.
+      - name: Sign release artifacts (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=( dist/*.tar.gz )
+          sboms=( dist/*.sbom.json )
+          # Fail LOUDLY on a coverage gap rather than nullglob-skipping it: the
+          # build emits one archive per (binary, platform) and one SBOM per
+          # archive, so there must be a non-zero, equal count of each. If a
+          # future goreleaser/syft default ever renamed the SBOM, sboms[] would
+          # silently empty out here -- this guard turns that into a hard failure
+          # instead of a release whose SBOMs are unsigned.
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives found in dist/ to sign"
+            exit 1
+          fi
+          if [ ${#sboms[@]} -ne ${#archives[@]} ]; then
+            echo "::error::SBOM/archive count mismatch: ${#sboms[@]} SBOMs vs ${#archives[@]} archives -- SBOMs would go unsigned"
+            exit 1
+          fi
+          files=( "${archives[@]}" "${sboms[@]}" dist/checksums.txt )
+          for f in "${files[@]}"; do
+            cosign sign-blob --yes \
+              --bundle "${f}.cosign.bundle" \
+              "${f}"
+          done
+
+      # Native runner step: SLSA build provenance over the released set. Uses
+      # the SAME job OIDC to sign a provenance predicate via Fulcio/Rekor and
+      # stores it as a first-party attestation bound to this repo + workflow.
+      # subject-checksums points at goreleaser's sha256 checksums.txt, so every
+      # listed file is attested in one statement; the subject digests then match
+      # exactly what a consumer downloads. Consumer verify:
+      # gh attestation verify <file> --owner Wide-Moat.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-checksums: dist/checksums.txt
+
+      # Native runner step: attach the cosign bundles to the Release that
+      # goreleaser created on this tag. goreleaser uploads only its own
+      # artifacts; the .cosign.bundle files are produced after it runs. One
+      # bundle per signed file (archives, SBOMs, checksums.txt).
+      - name: Attach signatures to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundles=( dist/*.cosign.bundle )
+          if [ ${#bundles[@]} -eq 0 ]; then
+            echo "::error::no cosign bundles to upload"
+            exit 1
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${bundles[@]}" --clobber
+
+      # FINAL STEP -- fail-closed publish. goreleaser created the release as a
+      # draft; it becomes public ONLY here, after signing, provenance, and the
+      # sidecar upload have all succeeded. set -euo pipefail plus this step's
+      # position means any earlier signing/attestation failure aborts the job
+      # before the release is ever made public: a release is never published
+      # unsigned or unattested.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" --draft=false

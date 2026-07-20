@@ -16,6 +16,9 @@
 /ocu-audit-verify
 *.bin
 
+# goreleaser release output (archives, SBOMs, checksums, signatures).
+dist/
+
 # Runtime state produced by the service; never source.
 *.wal
 audit-head.json
