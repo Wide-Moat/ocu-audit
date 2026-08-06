@@ -90,6 +90,20 @@ linters:
         text: "G401|G505"
         path: internal/(chain|merkletree)/
 
+      # ── test files: idiomatic test patterns are not production findings ─────
+      # Ported verbatim from ocu-control, which settled this for the fleet. The
+      # production source stays under the full linter set; only test fixtures
+      # get this relief, where helper-return assertions and style quickfixes are
+      # noise, not defects. bodyclose in particular cannot trace a close
+      # registered through t.Cleanup, which is where the ingest rig closes the
+      # probe responses it hands back.
+      - path: _test.go
+        linters:
+          - gosec      # tests legitimately write temp files, use weak rng, etc.
+          - errcheck   # asserting on every helper return drowns the real checks
+          - gocritic   # fixture nits (stringXbytes, ...) add no safety
+          - bodyclose  # short-lived probe responses in tests are not leaks
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
