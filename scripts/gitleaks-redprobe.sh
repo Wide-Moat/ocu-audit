@@ -58,12 +58,19 @@ echo "probe derives the scan from $WORKFLOW: $image ${scan_args[*]}"
 # gate that had simply looked elsewhere. The probe therefore commits the planted
 # value to a scratch branch and scans that, which is the path a real leak takes.
 probe_file=".gitleaks-redprobe.tmp.toml"
-start_ref=$(git rev-parse --abbrev-ref HEAD)
+# The COMMIT, not the branch name. CI checks out a detached HEAD, where
+# `rev-parse --abbrev-ref HEAD` answers the literal string "HEAD" -- checking
+# that back out is a no-op, so the planted commit would survive cleanup and the
+# clean arm would fail against the probe's own plant. A SHA restores the
+# starting point on a branch and a detached HEAD alike.
+start_ref=$(git rev-parse HEAD)
 readonly start_ref
 cleanup() {
   rm -f "$probe_file"
   git rev-parse --verify -q redprobe-scratch >/dev/null 2>&1 || return 0
-  git checkout -q "$start_ref" 2>/dev/null || true
+  # --detach so the restore lands on the same commit whether the caller started
+  # on a branch or already detached; the scratch branch is then deletable.
+  git checkout -q --detach "$start_ref" 2>/dev/null || true
   git branch -q -D redprobe-scratch 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -73,7 +80,10 @@ trap cleanup EXIT
 # example-secret exclusion) would neutralise — the probe would then pass while
 # proving nothing, which is the failure mode it exists to catch.
 planted="glpat-$(printf 'PROBE')onlyFAKE0987654321"
-git checkout -q -b redprobe-scratch
+# -B, not -b: a prior run killed before its trap fired leaves the scratch branch
+# behind, and `-b` would abort on it -- turning one interrupted run into a probe
+# that can never run again without manual repair.
+git checkout -q -B redprobe-scratch
 printf 'gitlab_pat = "%s"\n' "$planted" >"$probe_file"
 git add "$probe_file"
 git -c user.email=redprobe@localhost -c user.name=redprobe commit -q -m "probe: planted credential (scratch branch, never pushed)"
