@@ -15,7 +15,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -29,7 +31,17 @@ import (
 	"github.com/Wide-Moat/ocu-audit/internal/wal"
 )
 
+// main is a thin shell: every exit path funnels through run so the deferred WAL
+// close actually runs. log.Fatalf skips defers, and on this component the
+// skipped defer is the durable bus -- an exit that bypasses it can drop records
+// the chain has already sequenced.
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("ocu-audit: %v", err)
+	}
+}
+
+func run() error {
 	var (
 		listen        = flag.String("listen", ":8443", "mTLS ingest listen address")
 		walPath       = flag.String("wal", "audit.wal", "append-only WAL path (durable bus)")
@@ -44,32 +56,39 @@ func main() {
 	flag.Parse()
 
 	if *serverCert == "" || *serverKey == "" || *clientCAFile == "" || *signKeyFile == "" {
-		log.Fatal("ocu-audit: -server-cert, -server-key, -client-ca and -sign-key are required")
+		return errors.New("-server-cert, -server-key, -client-ca and -sign-key are required")
 	}
 
 	w, err := wal.Open(*walPath)
 	if err != nil {
-		log.Fatalf("ocu-audit: open wal: %v", err)
+		return fmt.Errorf("open wal: %w", err)
 	}
-	defer w.Close()
+	// Now that run() returns rather than log.Fatalf-ing, this defer actually
+	// fires -- and a WAL close that fails means buffered records may not be on
+	// stable storage, which is exactly what this component must not swallow.
+	defer func() {
+		if cerr := w.Close(); cerr != nil {
+			log.Printf("ocu-audit: wal close: %v", cerr)
+		}
+	}()
 
 	st := store.New(w)
 	sgn, err := signer.LoadPrivateKey(*signKeyFile)
 	if err != nil {
-		log.Fatalf("ocu-audit: load sign key: %v", err)
+		return fmt.Errorf("load sign key: %w", err)
 	}
 
 	cert, err := tls.LoadX509KeyPair(*serverCert, *serverKey)
 	if err != nil {
-		log.Fatalf("ocu-audit: load server keypair: %v", err)
+		return fmt.Errorf("load server keypair: %w", err)
 	}
 	caPEM, err := os.ReadFile(*clientCAFile)
 	if err != nil {
-		log.Fatalf("ocu-audit: read client CA: %v", err)
+		return fmt.Errorf("read client CA: %w", err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caPEM) {
-		log.Fatalf("ocu-audit: client CA bundle contains no certificates")
+		return errors.New("client CA bundle contains no certificates")
 	}
 
 	authz := ingest.DefaultAuthz(*execDriverCN)
@@ -110,8 +129,11 @@ func main() {
 
 	log.Printf("ocu-audit: mTLS ingest listening on %s (wal=%s)", *listen, *walPath)
 	if err := httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("ocu-audit: serve: %v", err)
+		return fmt.Errorf("serve: %w", err)
 	}
+	// A clean shutdown returns here, so the deferred WAL close runs before the
+	// process exits -- which is the whole reason this is run() and not main().
+	return nil
 }
 
 // dumpHead signs the current Merkle head and writes the submission envelope.
@@ -130,5 +152,9 @@ func dumpHead(st *store.Store, sgn *signer.Signer, out string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(out, b, 0o644)
+	// 0600, not 0644: the signed Merkle head is the tamper-evidence artifact
+	// this component exists to produce, and a world-readable one on a shared
+	// host hands every local account the chain state. The WAL beside it already
+	// opens 0600; this was the odd file out.
+	return os.WriteFile(out, b, 0o600)
 }

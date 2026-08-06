@@ -50,6 +50,9 @@ type WAL struct {
 // Open opens (creating if absent) the WAL at path in append mode. The file's
 // own Sync is the default durability seam.
 func Open(path string) (*WAL, error) {
+	// #nosec G304 -- path is the operator's -wal flag, not caller input. The
+	// daemon must open the WAL the deployment names; there is no allow-list to
+	// check it against, and refusing a variable path would mean hardcoding one.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open wal %q: %w", path, err)
@@ -125,6 +128,8 @@ func (w *WAL) Close() error {
 // mismatch on a fully-framed record is a hard error (a middle-record
 // corruption / tamper) so the verifier reds rather than silently skipping it.
 func ReadAll(path string) ([][]byte, error) {
+	// #nosec G304 -- same operator-supplied path as Open above; the verifier
+	// reads the WAL the operator names.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open wal %q: %w", path, err)

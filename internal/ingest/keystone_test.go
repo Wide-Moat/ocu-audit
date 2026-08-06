@@ -90,6 +90,10 @@ func (r *keystoneRig) publish(t *testing.T, client *http.Client, address string,
 	if err != nil {
 		t.Fatalf("publish to %s: %v", address, err)
 	}
+	// Closed here rather than at each call site: every caller wants the status
+	// or the decoded body and none wants the descriptor, so leaving the close
+	// to them leaked one connection per publish across the keystone suites.
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 

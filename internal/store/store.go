@@ -36,10 +36,6 @@ var ErrSequenceRegressed = errors.New("store: sequence not strictly increasing")
 // is appended.
 var ErrDuplicate = errors.New("store: duplicate (source, sequence)")
 
-// walRecord is the JSON persisted per WAL frame. It is the pipeline-authored
-// ocsf.Record; the WAL frames and CRCs it, the store hash-chains it.
-type walRecord = ocsf.Record
-
 // Store coordinates durable commit and chain authorship.
 type Store struct {
 	mu sync.Mutex
@@ -110,7 +106,11 @@ func (s *Store) Admit(source string, env *ocsf.PublishEnvelope) (*ocsf.Record, e
 	}
 	chain.Author(rec, prev) // authors PrevHash/ChainHash (INV-3)
 
-	frame, err := json.Marshal((*walRecord)(rec))
+	// The WAL frame IS the pipeline-authored ocsf.Record, serialized as-is: the
+	// WAL frames and CRCs it, the store hash-chains it. It carried a walRecord
+	// alias to say so, which left an unreferenced type once the no-op
+	// conversion went; the sentence says it without one.
+	frame, err := json.Marshal(rec)
 	if err != nil {
 		return nil, fmt.Errorf("store: marshal record: %w", err)
 	}

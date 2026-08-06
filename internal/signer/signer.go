@@ -79,6 +79,9 @@ func Generate() (*Signer, error) {
 
 // LoadPrivateKey loads a raw 64-byte Ed25519 private key from a file.
 func LoadPrivateKey(path string) (*Signer, error) {
+	// #nosec G304 -- path is the operator's -sign-key flag. The signing key
+	// lives where the deployment puts it; this is key loading, not caller-
+	// controlled file access.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("signer: read key %q: %w", path, err)
