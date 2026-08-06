@@ -10,7 +10,7 @@ module github.com/Wide-Moat/ocu-audit
 // provides the RFC-6962 log hasher and inclusion/consistency proofs; it
 // passes the license gate and supply-chain gate (SBOM + signed releases).
 
-go 1.26.2
+go 1.26.5
 
 require github.com/transparency-dev/merkle v0.0.2
 
