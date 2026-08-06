@@ -86,6 +86,33 @@ jobs:
         with:
           path: ./
           extra_args: --no-verification
+      # RED-when-neutered proof. The step above can go quiet without failing: an
+      # over-broad exclude entry, or a `path:` that stops resolving, removes the
+      # tree from the scan while the job stays green — and a green secrets job is
+      # what an auditor reads as "no secrets". The probe plants a credential and
+      # requires the scan to NAME that file.
+      - name: install trufflehog binary (for the red-probe)
+        # Fetch the RELEASE TARBALL at the version the action above runs and
+        # verify its bytes, rather than piping an installer script from a moving
+        # branch into a shell. An installer fetched from `main` is unpinned by
+        # construction: the SHA-pinned action buys nothing if the next step runs
+        # whatever that branch holds today, in a job that gates every push and tag.
+        # The version tracks the action pin so the probe measures the same scanner
+        # release the gate does; scripts/trufflehog-redprobe.sh fails closed if the
+        # action pin moves without the probe being re-verified.
+        env:
+          TH_VERSION: 3.95.7
+          # sha256 of trufflehog_3.95.7_linux_amd64.tar.gz, from the release checksums.
+          TH_SHA256: e4d3f101bc9beb6969ec44fb7df0f2efe3115ed7749e113482426d6d966e1093
+        run: |
+          set -euo pipefail
+          url="https://github.com/trufflesecurity/trufflehog/releases/download/v${TH_VERSION}/trufflehog_${TH_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL "$url" -o /tmp/trufflehog.tgz
+          echo "${TH_SHA256}  /tmp/trufflehog.tgz" | sha256sum -c -
+          tar -xzf /tmp/trufflehog.tgz -C /usr/local/bin trufflehog
+          trufflehog --version
+      - name: trufflehog red-probe (gate-fires proof)
+        run: bash scripts/trufflehog-redprobe.sh
 
   sast-semgrep:
     runs-on: ubuntu-latest
