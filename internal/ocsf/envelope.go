@@ -71,6 +71,19 @@ func DecodePublish(raw []byte) (*PublishEnvelope, error) {
 	if dec.More() {
 		return nil, errors.New("decode publish envelope: trailing data after JSON value")
 	}
+	// sequence is a uint64, so an OMITTED sequence decodes as 0 — indistinguishable
+	// from a legitimate sequence: 0. The contract requires the field PRESENT
+	// (AuditEnvelope.required, INV-8), so re-decode a presence probe: an absent
+	// sequence is a malformed publish, not a genesis event.
+	var probe struct {
+		Sequence *uint64 `json:"sequence"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("decode publish envelope (sequence presence): %w", err)
+	}
+	if probe.Sequence == nil {
+		return nil, errors.New("decode publish envelope: sequence is required")
+	}
 	if err := e.validate(); err != nil {
 		return nil, err
 	}
