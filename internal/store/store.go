@@ -81,8 +81,9 @@ type srcSeq struct {
 	seq    uint64
 }
 
-// New wraps an open WAL. On a fresh WAL the maps are empty; a recovering store
-// rebuilds them with Replay before serving.
+// New wraps an open WAL with empty state. A restarting daemon must NOT serve
+// this bare: it boots through Recover, which rebuilds the maps, records, and
+// accumulator from the WAL (verifying the chains) before serving.
 func New(w *wal.WAL, clk Clock) *Store {
 	if clk == nil {
 		clk = SystemClock{}
