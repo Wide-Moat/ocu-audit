@@ -16,6 +16,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  vendored-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: audit fan-in vendored-contract drift guard
+        # No canon checkout in CI, so the canon-identity half skips with a
+        # notice; the local-pin half always runs — an accidental edit to the
+        # vendored copy, or the copy sitting stale against the recorded pin,
+        # fails here. Bumping the contract is a deliberate PINNED_CANON_BLOB +
+        # CANON_COMMIT edit in the same PR that re-vendors.
+        run: bash scripts/check-vendored-contract.sh
+
   gofmt:
     runs-on: ubuntu-latest
     steps:
