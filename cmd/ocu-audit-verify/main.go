@@ -51,7 +51,9 @@ func main() {
 		fatalf("ocu-audit-verify: decode pubkey: %v", err)
 	}
 
-	records, err := store.ReadRawRecords(*walPath)
+	// The hot union: sealed segments in index order, then the active file
+	// (ADR-0045 stage 1). A single unsealed WAL reads identically to before.
+	records, err := store.ReadHotRecords(*walPath)
 	if err != nil {
 		fatalf("ocu-audit-verify: read wal: %v", err)
 	}
