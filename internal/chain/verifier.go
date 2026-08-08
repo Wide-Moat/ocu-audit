@@ -25,9 +25,18 @@ func equalHash(a, b []byte) bool {
 // This is the anti-fake-green core: it recomputes hashes from the raw record
 // fields, never trusting a stored ChainHash as an oracle.
 func VerifyChain(source string, records []*ocsf.Record) error {
-	prev := GenesisPrevHash
-	var lastSeq uint64
-	haveSeq := false
+	return verifyChainFrom(source, GenesisPrevHash, 0, false, records)
+}
+
+// VerifyChainAnchored verifies a source's linkage starting from an anchored
+// tip instead of genesis (ADR-0045 hot-only boot): the first record's
+// PrevHash must equal anchorHash and its sequence must exceed anchorSeq, so a
+// hot suffix that does not continue the rotated prefix refuses.
+func VerifyChainAnchored(source string, anchorHash []byte, anchorSeq uint64, records []*ocsf.Record) error {
+	return verifyChainFrom(source, anchorHash, anchorSeq, true, records)
+}
+
+func verifyChainFrom(source string, prev []byte, lastSeq uint64, haveSeq bool, records []*ocsf.Record) error {
 	for i, rec := range records {
 		if rec.Source != source {
 			return fmt.Errorf("source %q record %d: carries source %q", source, i, rec.Source)

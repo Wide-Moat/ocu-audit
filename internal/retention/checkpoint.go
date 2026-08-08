@@ -49,14 +49,21 @@ type SegmentEntry struct {
 type Checkpoint struct {
 	Policy   Policy         `json:"policy"`
 	Segments []SegmentEntry `json:"segments"`
-	// ChainTips maps each source to its last committed chain hash within the
-	// rotated (cold) prefix. The first hot record of a source must link onto
-	// its tip; a source absent here anchors on genesis.
-	ChainTips map[string][]byte `json:"chain_tips"`
+	// ChainTips maps each source to its last committed chain hash AND
+	// sequence within the rotated (cold) prefix. The first hot record of a
+	// source must link onto the hash and exceed the sequence; a source absent
+	// here anchors on genesis.
+	ChainTips map[string]ChainTip `json:"chain_tips"`
 	// TreeSize and Frontier are the Merkle accumulator state at the rotation
 	// boundary (merkletree.Frontier).
 	TreeSize uint64   `json:"tree_size"`
 	Frontier [][]byte `json:"frontier"`
+}
+
+// ChainTip is one source's chain state at the rotation boundary.
+type ChainTip struct {
+	Hash []byte `json:"hash"`
+	Seq  uint64 `json:"seq"`
 }
 
 // SignedCheckpoint is the on-disk form: the checkpoint, its detached
@@ -110,7 +117,8 @@ func (c Checkpoint) SignBytes() []byte {
 	u64(uint64(len(sources)))
 	for _, src := range sources {
 		field([]byte(src))
-		field(c.ChainTips[src])
+		field(c.ChainTips[src].Hash)
+		u64(c.ChainTips[src].Seq)
 	}
 
 	u64(c.TreeSize)

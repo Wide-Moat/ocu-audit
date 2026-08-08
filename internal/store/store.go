@@ -54,6 +54,10 @@ type Store struct {
 	acc     *merkletree.Accumulator
 	// clock is the trusted-time source IngestTime is stamped from (NFR-SEC-48).
 	clock Clock
+	// globalOffset is the number of rotated (cold) records preceding
+	// records[0] in the global commit order (ADR-0045): zero on an
+	// unrotated store. Proof indexes are GLOBAL; Records() stays hot-only.
+	globalOffset uint64
 	// ingestFloor is the highest IngestTime already committed. The stamp never
 	// falls below it, so a wall-clock rollback cannot backdate a committed
 	// record — a trusted stamp a rollback could lower would be no more
@@ -192,18 +196,24 @@ func (s *Store) Head() ([]byte, uint64, error) {
 }
 
 // InclusionProof returns the inclusion proof for the committed record at the
-// given global commit index.
+// given GLOBAL commit index. A rotated (cold) index is refused: the hot-only
+// accumulator lacks the pre-frontier nodes, and cold proofs are the offline
+// verifier's job over the full union (ADR-0045).
 func (s *Store) InclusionProof(index uint64) ([][]byte, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if index >= uint64(len(s.records)) {
-		return nil, nil, fmt.Errorf("store: index %d out of range (%d records)", index, len(s.records))
+	if index < s.globalOffset {
+		return nil, nil, fmt.Errorf("store: index %d is in the rotated cold prefix (< %d); use the offline verifier", index, s.globalOffset)
+	}
+	local := index - s.globalOffset
+	if local >= uint64(len(s.records)) {
+		return nil, nil, fmt.Errorf("store: index %d out of range (%d records from offset %d)", index, len(s.records), s.globalOffset)
 	}
 	prf, err := s.acc.InclusionProof(index)
 	if err != nil {
 		return nil, nil, err
 	}
-	return prf, s.records[index].ChainHash, nil
+	return prf, s.records[local].ChainHash, nil
 }
 
 // FaultWALForTest injects a WAL syncer fault. It is the durability

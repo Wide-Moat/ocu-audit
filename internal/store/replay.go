@@ -41,12 +41,23 @@ func ReadRawRecords(path string) ([]*ocsf.Record, error) {
 // file with sealed segments present is a crash-between-rename-and-reopen; the
 // union is just the segments.
 func ReadHotRecords(activePath string) ([]*ocsf.Record, error) {
+	return readHotRecordsExcluding(activePath, nil)
+}
+
+// readHotRecordsExcluding reads the hot union, skipping segments whose base
+// name appears in exclude — the rotated-but-pending-removal state (ADR-0045):
+// their records are cold-anchored, and counting them again would double-count
+// the prefix the boot anchor already covers.
+func readHotRecordsExcluding(activePath string, exclude map[string]struct{}) ([]*ocsf.Record, error) {
 	segs, err := wal.ListSegments(filepath.Dir(activePath))
 	if err != nil {
 		return nil, err
 	}
 	var out []*ocsf.Record
 	for _, seg := range segs {
+		if _, skip := exclude[filepath.Base(seg)]; skip {
+			continue
+		}
 		recs, err := ReadRawRecords(seg)
 		if err != nil {
 			return nil, fmt.Errorf("store: segment %s: %w", filepath.Base(seg), err)

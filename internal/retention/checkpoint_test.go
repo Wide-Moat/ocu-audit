@@ -49,9 +49,9 @@ func testCheckpoint(t *testing.T, floorYears int) Checkpoint {
 				SealedAtMillis: 5000, RotatedAtMillis: 0, // still hot
 			},
 		},
-		ChainTips: map[string][]byte{
-			"control-plane": bytes.Repeat([]byte{0x01}, 32),
-			"object-store":  bytes.Repeat([]byte{0x02}, 32),
+		ChainTips: map[string]ChainTip{
+			"control-plane": {Hash: bytes.Repeat([]byte{0x01}, 32), Seq: 12},
+			"object-store":  {Hash: bytes.Repeat([]byte{0x02}, 32), Seq: 7},
 		},
 		TreeSize: 3,
 		Frontier: [][]byte{bytes.Repeat([]byte{0x03}, 32), bytes.Repeat([]byte{0x04}, 32)},
@@ -76,7 +76,8 @@ func TestCheckpointRoundTrip(t *testing.T) {
 	}
 	if got.TreeSize != cp.TreeSize || len(got.Segments) != 2 ||
 		got.Segments[0].Name != "audit-000001.wal" ||
-		!bytes.Equal(got.ChainTips["control-plane"], cp.ChainTips["control-plane"]) ||
+		!bytes.Equal(got.ChainTips["control-plane"].Hash, cp.ChainTips["control-plane"].Hash) ||
+		got.ChainTips["control-plane"].Seq != 12 ||
 		len(got.Frontier) != 2 {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
@@ -206,7 +207,8 @@ func TestSignBytesBindsEveryAnchorField(t *testing.T) {
 	base := testCheckpoint(t, 7).SignBytes()
 	mutate := map[string]func(*Checkpoint){
 		"segment sha":  func(c *Checkpoint) { c.Segments[0].SHA256[0] ^= 1 },
-		"chain tip":    func(c *Checkpoint) { c.ChainTips["control-plane"][0] ^= 1 },
+		"chain tip":    func(c *Checkpoint) { c.ChainTips["control-plane"].Hash[0] ^= 1 },
+		"tip sequence": func(c *Checkpoint) { t := c.ChainTips["control-plane"]; t.Seq++; c.ChainTips["control-plane"] = t },
 		"tree size":    func(c *Checkpoint) { c.TreeSize++ },
 		"frontier":     func(c *Checkpoint) { c.Frontier[0][0] ^= 1 },
 		"floor":        func(c *Checkpoint) { c.Policy.FloorYears++ },
