@@ -37,8 +37,14 @@ var GenesisPrevHash = make([]byte, HashSize)
 // Compute returns the chain hash of a record given its predecessor's chain hash.
 // prev must be the predecessor's ChainHash, or GenesisPrevHash for the first
 // record on the source. The returned slice is a fresh HashSize-byte value.
+// chainDomainTag scopes the per-record chain hash to this use, mirroring the
+// head envelope's "ocu-audit-head/v1". Without it a record hash could collide
+// with another OCU hash construction over the same bytes.
+const chainDomainTag = "ocu-audit-chain/v1\x00"
+
 func Compute(prev []byte, seq uint64, canonicalEvent []byte) []byte {
 	h := sha256.New()
+	h.Write([]byte(chainDomainTag))
 	h.Write(prev)
 	var seqBuf [8]byte
 	binary.BigEndian.PutUint64(seqBuf[:], seq)

@@ -13,11 +13,15 @@ import (
 // the writes, or skips the sequence: such a mutant produces a different digest
 // than the fixed vector, so this test reds even though Author+Verify would
 // agree with the mutated code symmetrically.
+// The vectors changed when Compute gained the "ocu-audit-chain/v1" domain tag
+// (NFR-SEC-48 IngestTime work). They are recomputed independently:
+//
+//	sha256( tag || prev || BE64(seq) || event ).
 func TestComputeKnownAnswer(t *testing.T) {
 	// Vector 1: genesis prev (32 zero bytes), seq 7, fixed event bytes.
 	prev := make([]byte, HashSize)
 	got := Compute(prev, 7, []byte("canonical-event-bytes-fixture"))
-	want := "9ecfec67a4093919fad7bba159af139cdb5cb06657dbdae13a534692b641ac91"
+	want := "76b77bbb07c7d588cc41cc795c780becc2f52336401a06dae06632c40b697739"
 	if hex.EncodeToString(got) != want {
 		t.Fatalf("vector 1: got %s want %s", hex.EncodeToString(got), want)
 	}
@@ -28,7 +32,7 @@ func TestComputeKnownAnswer(t *testing.T) {
 		prev2[i] = byte(i)
 	}
 	got2 := Compute(prev2, 42, []byte("x"))
-	want2 := "3ed326adde71adb8bc3e5664d33e720cd38e138eb4eb33e01b7c06f090b55977"
+	want2 := "fb35c7b2fe89e601b3f81e10b63715a6709922db97b4bae91b9a94193d762d85"
 	if hex.EncodeToString(got2) != want2 {
 		t.Fatalf("vector 2: got %s want %s", hex.EncodeToString(got2), want2)
 	}

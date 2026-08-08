@@ -131,8 +131,14 @@ type Record struct {
 	Action    string          `json:"action"`
 	Outcome   Outcome         `json:"outcome"`
 	Payload   json.RawMessage `json:"payload"`
-	PrevHash  []byte          `json:"prev_hash"`
-	ChainHash []byte          `json:"chain_hash"`
+	// IngestTime is the pipeline-stamped TRUSTED wall-clock (epoch millis),
+	// authored at commit from the host trusted-time source (NFR-SEC-48). It is
+	// distinct from the source-authored occurred-at time on the OCSF payload:
+	// that one is recorded but untrusted, this one is host-attested and
+	// hash-bound. It never orders the chain (INV-5) — sequence does.
+	IngestTime int64  `json:"ingest_time"`
+	PrevHash   []byte `json:"prev_hash"`
+	ChainHash  []byte `json:"chain_hash"`
 }
 
 // CanonicalEventBytes returns the deterministic byte encoding of the event's
@@ -151,6 +157,9 @@ func (r *Record) CanonicalEventBytes() []byte {
 	writeField(&b, []byte(r.Resource))
 	writeField(&b, []byte(r.Action))
 	writeField(&b, []byte(r.Outcome))
+	// The trusted ingest stamp is inside the hash: an unhashed time field would
+	// be the one backdatable field on an otherwise tamper-evident record.
+	writeU64(&b, uint64(r.IngestTime))
 	writeField(&b, canonicalJSON(r.Payload))
 	return b.Bytes()
 }
