@@ -50,6 +50,68 @@ func New() *Accumulator {
 	}
 }
 
+// Frontier returns the tree size and the compact-range hashes covering
+// [0, size) — the minimal left-to-right set of perfect-subtree roots
+// (ADR-0045: the retention checkpoint records these so a restart rebuilds the
+// accumulator without the cold tier).
+func (a *Accumulator) Frontier() (uint64, [][]byte) {
+	src := a.rng.Hashes()
+	hashes := make([][]byte, len(src))
+	for i, h := range src {
+		hashes[i] = append([]byte(nil), h...)
+	}
+	return a.size, hashes
+}
+
+// NewFromFrontier reconstructs an accumulator whose prefix [0, size) is
+// represented by the given compact-range hashes. Appends continue the SAME
+// tree: the continued root equals the root an uninterrupted accumulator
+// reaches over identical leaves. Inclusion proofs are served for
+// post-frontier leaves only — pre-frontier proofs belong to the offline
+// verifier, which holds the full leaf set. A hash count that cannot represent
+// the claimed size is refused.
+func NewFromFrontier(size uint64, hashes [][]byte) (*Accumulator, error) {
+	h := rfc6962.New(crypto.SHA256)
+	rf := &compact.RangeFactory{Hash: h.HashChildren}
+	rng, err := rf.NewRange(0, size, hashes)
+	if err != nil {
+		return nil, fmt.Errorf("merkletree: frontier for size %d: %w", size, err)
+	}
+	a := &Accumulator{
+		hasher: h,
+		rf:     rf,
+		rng:    rng,
+		nodes:  make(map[compact.NodeID][]byte),
+		size:   size,
+	}
+	// Record the frontier subtree roots as known nodes: they are the highest
+	// nodes an inclusion path for a post-frontier leaf can reference inside
+	// the pre-frontier prefix, and every node above them is computed (and
+	// recorded) by later appends and root computations.
+	begin := uint64(0)
+	for _, hash := range hashes {
+		// Each compact hash covers the largest aligned perfect subtree
+		// starting at begin that fits within [begin, size).
+		level, width := largestAlignedSubtree(begin, size)
+		id := compact.NewNodeID(level, begin>>level)
+		a.nodes[id] = append([]byte(nil), hash...)
+		begin += width
+	}
+	return a, nil
+}
+
+// largestAlignedSubtree returns the level and leaf-width of the largest
+// perfect subtree aligned at begin that fits within [begin, end).
+func largestAlignedSubtree(begin, end uint64) (uint, uint64) {
+	level := uint(0)
+	width := uint64(1)
+	for begin%(width*2) == 0 && begin+width*2 <= end {
+		level++
+		width *= 2
+	}
+	return level, width
+}
+
 // AppendLeaf adds one leaf. leafData is the raw leaf content (a committed chain
 // hash); it is run through the RFC-6962 leaf hash (0x00 prefix) so a leaf can
 // never be confused with an interior node (0x01 prefix). Every interior node

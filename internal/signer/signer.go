@@ -158,3 +158,29 @@ func bytesEqual(a, b []byte) bool {
 	}
 	return true
 }
+
+// SignMessage signs an envelope's canonical bytes directly. Every envelope
+// type embeds its own domain tag inside its SignBytes encoding (the
+// HeadEnvelope pattern), so two artifact classes can never share a signed
+// form even under this one key (ADR-0045: the retention checkpoint signs
+// under "ocu-audit-retention/v1" with the same host-local key).
+func (s *Signer) SignMessage(canonical []byte) []byte {
+	return ed25519.Sign(s.priv, canonical)
+}
+
+// VerifyMessage checks a detached signature over an envelope's canonical
+// bytes against a pinned public key.
+func VerifyMessage(pinnedPub, canonical, sig []byte) error {
+	if len(pinnedPub) != ed25519.PublicKeySize {
+		return fmt.Errorf("signer: pinned public key is %d bytes, want %d",
+			len(pinnedPub), ed25519.PublicKeySize)
+	}
+	if len(sig) != ed25519.SignatureSize {
+		return fmt.Errorf("signer: signature is %d bytes, want %d",
+			len(sig), ed25519.SignatureSize)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pinnedPub), canonical, sig) {
+		return errors.New("signer: Ed25519 signature verification failed")
+	}
+	return nil
+}
