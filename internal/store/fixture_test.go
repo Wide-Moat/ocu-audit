@@ -29,7 +29,7 @@ func TestEmitVerifierFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st := New(w)
+	st := New(w, zeroClock{})
 	// Two sources, interleaved, into two chains.
 	for seq := uint64(1); seq <= 4; seq++ {
 		for _, src := range []string{"control-plane", "object-store"} {

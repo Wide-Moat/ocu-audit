@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Wide-Moat/ocu-audit/internal/chain"
 	"github.com/Wide-Moat/ocu-audit/internal/merkletree"
@@ -51,7 +52,29 @@ type Store struct {
 	// order). It mirrors the WAL, kept in memory for head/proof service.
 	records []*ocsf.Record
 	acc     *merkletree.Accumulator
+	// clock is the trusted-time source IngestTime is stamped from (NFR-SEC-48).
+	clock Clock
+	// ingestFloor is the highest IngestTime already committed. The stamp never
+	// falls below it, so a wall-clock rollback cannot backdate a committed
+	// record — a trusted stamp a rollback could lower would be no more
+	// trustworthy than the source clock it exists to distrust.
+	ingestFloor int64
 }
+
+// Clock supplies the pipeline's trusted wall-clock in epoch milliseconds. It is
+// injected so a test can drive a rollback; production passes SystemClock.
+type Clock interface {
+	NowMillis() int64
+}
+
+// SystemClock reads the host wall-clock. The host trusted-time floor
+// (NTS-anchored, monotonic per NFR-SEC-48) is the deployment's concern; the
+// store additionally floors the stamp so an in-process regression cannot lower
+// it.
+type SystemClock struct{}
+
+// NowMillis returns the current time in epoch milliseconds.
+func (SystemClock) NowMillis() int64 { return time.Now().UnixMilli() }
 
 type srcSeq struct {
 	source string
@@ -60,13 +83,17 @@ type srcSeq struct {
 
 // New wraps an open WAL. On a fresh WAL the maps are empty; a recovering store
 // rebuilds them with Replay before serving.
-func New(w *wal.WAL) *Store {
+func New(w *wal.WAL, clk Clock) *Store {
+	if clk == nil {
+		clk = SystemClock{}
+	}
 	return &Store{
 		w:                 w,
 		perSourceLastHash: make(map[string][]byte),
 		perSourceLastSeq:  make(map[string]uint64),
 		seen:              make(map[srcSeq]struct{}),
 		acc:               merkletree.New(),
+		clock:             clk,
 	}
 }
 
@@ -103,6 +130,8 @@ func (s *Store) Admit(source string, env *ocsf.PublishEnvelope) (*ocsf.Record, e
 		Action:    env.Action,
 		Outcome:   env.Outcome,
 		Payload:   env.Payload,
+		// Trusted stamp, floored so a rollback cannot lower it (NFR-SEC-48).
+		IngestTime: s.stampIngest(),
 	}
 	chain.Author(rec, prev) // authors PrevHash/ChainHash (INV-3)
 
@@ -178,4 +207,16 @@ func (s *Store) Records() []*ocsf.Record {
 	out := make([]*ocsf.Record, len(s.records))
 	copy(out, s.records)
 	return out
+}
+
+// stampIngest reads the trusted clock and applies the monotonic floor, so a
+// committed IngestTime never regresses below one already committed. Called
+// under the store lock.
+func (s *Store) stampIngest() int64 {
+	now := s.clock.NowMillis()
+	if now < s.ingestFloor {
+		now = s.ingestFloor
+	}
+	s.ingestFloor = now
+	return now
 }

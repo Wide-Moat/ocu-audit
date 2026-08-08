@@ -21,7 +21,7 @@ func newStore(t *testing.T) (*Store, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	return New(w), p
+	return New(w, zeroClock{}), p
 }
 
 func env(seq uint64) *ocsf.PublishEnvelope {
@@ -148,3 +148,9 @@ func (faultSyncer) Sync() error { return errors.New("injected fsync fault") }
 type realSyncer struct{ st *Store }
 
 func (realSyncer) Sync() error { return nil }
+
+// zeroClock stamps IngestTime 0, so record goldens stay deterministic. Tests
+// that exercise IngestTime behaviour inject their own fakeClock.
+type zeroClock struct{}
+
+func (zeroClock) NowMillis() int64 { return 0 }

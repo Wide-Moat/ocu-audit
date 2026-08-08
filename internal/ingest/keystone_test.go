@@ -39,7 +39,7 @@ func newKeystoneRig(t *testing.T) *keystoneRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = w.Close() })
-	st := store.New(w)
+	st := store.New(w, zeroStoreClock{})
 	sgn, err := signer.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -238,3 +238,9 @@ func rewriteWAL(t *testing.T, path string, frames [][]byte) {
 		t.Fatal(err)
 	}
 }
+
+// zeroStoreClock stamps IngestTime 0 so the keystone's per-record hashes are
+// deterministic across runs.
+type zeroStoreClock struct{}
+
+func (zeroStoreClock) NowMillis() int64 { return 0 }

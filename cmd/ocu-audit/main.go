@@ -72,7 +72,7 @@ func run() error {
 		}
 	}()
 
-	st := store.New(w)
+	st := store.New(w, store.SystemClock{})
 	sgn, err := signer.LoadPrivateKey(*signKeyFile)
 	if err != nil {
 		return fmt.Errorf("load sign key: %w", err)
