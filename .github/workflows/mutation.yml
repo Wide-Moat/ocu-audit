@@ -55,7 +55,7 @@ jobs:
       - name: gremlins unleash (advisory summary)
         run: |
           set -u
-          for pkg in ./internal/chain/ ./internal/ocsf/ ./internal/signer/; do
+          for pkg in ./internal/chain/ ./internal/ocsf/ ./internal/signer/ ./internal/retention/ ./internal/merkletree/; do
             echo "::group::gremlins unleash $pkg"
             gremlins unleash "$pkg" || echo "::warning::gremlins non-zero exit for $pkg (advisory)"
             echo "::endgroup::"

@@ -54,6 +54,10 @@ type Store struct {
 	acc     *merkletree.Accumulator
 	// clock is the trusted-time source IngestTime is stamped from (NFR-SEC-48).
 	clock Clock
+	// globalOffset is the number of rotated (cold) records preceding
+	// records[0] in the global commit order (ADR-0045): zero on an
+	// unrotated store. Proof indexes are GLOBAL; Records() stays hot-only.
+	globalOffset uint64
 	// ingestFloor is the highest IngestTime already committed. The stamp never
 	// falls below it, so a wall-clock rollback cannot backdate a committed
 	// record — a trusted stamp a rollback could lower would be no more
@@ -165,19 +169,59 @@ func (s *Store) Admit(source string, env *ocsf.PublishEnvelope) (*ocsf.Record, e
 	return rec, nil
 }
 
+// SealSnapshot is the commit-order state at a seal point — exactly the
+// anchors a rotation of the sealed prefix will promote into the retention
+// checkpoint (ADR-0045). Captured under the store lock, so it is exact.
+type SealSnapshot struct {
+	// Count and TreeSize are the GLOBAL committed-record count and Merkle
+	// size at the seal.
+	Count    uint64
+	TreeSize uint64
+	// Frontier is the accumulator frontier at the seal.
+	Frontier [][]byte
+	// Tips is each source's last hash+sequence at the seal.
+	Tips map[string]ChainTip
+}
+
 // SealActive seals the active WAL file to sealedPath (ADR-0045): under the
-// store lock it delegates to the WAL seal and returns the committed-record
-// count and Merkle tree size at the seal point — the commit-order snapshot the
-// retention checkpoint records. Admit blocks for the seal's duration, so the
-// snapshot is exact: every record in the sealed segment set is counted, none
-// from after.
-func (s *Store) SealActive(sealedPath string) (count uint64, treeSize uint64, err error) {
+// store lock it delegates to the WAL seal and snapshots the seal-point
+// anchors. Admit blocks for the seal's duration, so the snapshot is exact:
+// every record in the sealed segment set is covered, none from after.
+func (s *Store) SealActive(sealedPath string) (SealSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.w.SealTo(sealedPath); err != nil {
-		return 0, 0, fmt.Errorf("store: seal: %w", err)
+		return SealSnapshot{}, fmt.Errorf("store: seal: %w", err)
 	}
-	return uint64(len(s.records)), s.acc.Size(), nil
+	size, frontier := s.acc.Frontier()
+	tips := make(map[string]ChainTip, len(s.perSourceLastHash))
+	for src, h := range s.perSourceLastHash {
+		tips[src] = ChainTip{Hash: append([]byte(nil), h...), Seq: s.perSourceLastSeq[src]}
+	}
+	return SealSnapshot{
+		Count:    s.globalOffset + uint64(len(s.records)),
+		TreeSize: size,
+		Frontier: frontier,
+		Tips:     tips,
+	}, nil
+}
+
+// GlobalCount returns the global committed-record count: rotated (cold)
+// records plus the hot set. The retention manager's seal decision reads it.
+func (s *Store) GlobalCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.globalOffset + uint64(len(s.records))
+}
+
+// LastSequence returns the last committed sequence for a source (0 if none).
+// The ingest server seeds its self-emit sequence from it so the pipeline's
+// own channel continues across a restart instead of regressing to 1 — a
+// regressed self-emit would be refused and the evidence silently lost.
+func (s *Store) LastSequence(source string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.perSourceLastSeq[source]
 }
 
 // Head returns the current Merkle head over all committed records.
@@ -192,18 +236,24 @@ func (s *Store) Head() ([]byte, uint64, error) {
 }
 
 // InclusionProof returns the inclusion proof for the committed record at the
-// given global commit index.
+// given GLOBAL commit index. A rotated (cold) index is refused: the hot-only
+// accumulator lacks the pre-frontier nodes, and cold proofs are the offline
+// verifier's job over the full union (ADR-0045).
 func (s *Store) InclusionProof(index uint64) ([][]byte, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if index >= uint64(len(s.records)) {
-		return nil, nil, fmt.Errorf("store: index %d out of range (%d records)", index, len(s.records))
+	if index < s.globalOffset {
+		return nil, nil, fmt.Errorf("store: index %d is in the rotated cold prefix (< %d); use the offline verifier", index, s.globalOffset)
+	}
+	local := index - s.globalOffset
+	if local >= uint64(len(s.records)) {
+		return nil, nil, fmt.Errorf("store: index %d out of range (%d records from offset %d)", index, len(s.records), s.globalOffset)
 	}
 	prf, err := s.acc.InclusionProof(index)
 	if err != nil {
 		return nil, nil, err
 	}
-	return prf, s.records[index].ChainHash, nil
+	return prf, s.records[local].ChainHash, nil
 }
 
 // FaultWALForTest injects a WAL syncer fault. It is the durability

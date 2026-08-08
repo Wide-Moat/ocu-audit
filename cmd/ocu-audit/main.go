@@ -22,10 +22,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/Wide-Moat/ocu-audit/internal/ingest"
+	"github.com/Wide-Moat/ocu-audit/internal/retention"
 	"github.com/Wide-Moat/ocu-audit/internal/signer"
 	"github.com/Wide-Moat/ocu-audit/internal/store"
 )
@@ -57,6 +59,12 @@ func run() error {
 		headOut       = flag.String("head-out", "audit-head.json", "signed daily-head output path")
 		fairnessBurst = flag.Int("fairness-burst", 256, "per-source ingest burst capacity (NFR-SEC-56); a source may admit this many events back-to-back before refill governs its rate")
 		fairnessRefil = flag.Duration("fairness-refill", 10*time.Millisecond, "per-source ingest refill interval (NFR-SEC-56): one token restored per interval, so the steady-state share is 1/interval events per second")
+		coldDir       = flag.String("cold-dir", "", "cold-tier directory (ADR-0045; the customer's WORM mount point); empty derives <dir of -wal>/cold")
+		retFloor      = flag.Int("retention-floor-years", 7, "retention floor in years (NFR-COMP-01, >= 7); a shrink against the pinned checkpoint refuses boot")
+		retHotMax     = flag.Duration("retention-hot-max", 2160*time.Hour, "hot-tier ceiling (NFR-COMP-01, <= 90 d)")
+		retSeal       = flag.Duration("retention-seal-interval", 24*time.Hour, "seal cadence for the active WAL file")
+		retCheckpoint = flag.String("retention-checkpoint", "", "signed retention-checkpoint path; empty derives <dir of -wal>/retention-checkpoint.json")
+		retTick       = flag.Duration("retention-tick", time.Hour, "retention manager tick interval")
 		showVersion   = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
@@ -70,13 +78,60 @@ func run() error {
 		return errors.New("-server-cert, -server-key, -client-ca and -sign-key are required")
 	}
 
+	sgn, err := signer.LoadPrivateKey(*signKeyFile)
+	if err != nil {
+		return fmt.Errorf("load sign key: %w", err)
+	}
+
+	// Retention (ADR-0045, NFR-COMP-01): an invalid policy or a checkpoint
+	// that fails its signature, floor, or shrink gate refuses boot.
+	policy, err := retention.NewPolicy(*retFloor, *retHotMax, *retSeal)
+	if err != nil {
+		return err
+	}
+	hotDir := filepath.Dir(*walPath)
+	cold := *coldDir
+	if cold == "" {
+		cold = filepath.Join(hotDir, "cold")
+	}
+	if err := os.MkdirAll(cold, 0o700); err != nil {
+		return fmt.Errorf("cold dir: %w", err)
+	}
+	cpPath := *retCheckpoint
+	if cpPath == "" {
+		cpPath = filepath.Join(hotDir, "retention-checkpoint.json")
+	}
+	// The manager's seams close over st and srv, which exist only after
+	// recovery; the manager never ticks before both are assigned.
+	var st *store.Store
+	var srv *ingest.Server
+	mgr, err := retention.NewManager(retention.ManagerConfig{
+		Policy:         policy,
+		HotDir:         hotDir,
+		ColdDir:        cold,
+		CheckpointPath: cpPath,
+		Signer:         sgn,
+		CurrentCount:   func() uint64 { return st.GlobalCount() },
+		Seal:           func(p string) (store.SealSnapshot, error) { return st.SealActive(p) },
+		Emit: func(action, resource string, payload map[string]any) {
+			srv.SelfEmit(action, resource, payload)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("retention checkpoint: %w", err)
+	}
+
 	// Recover, never merely open: the store rebuilds chain tips, sequence
-	// tips, dedupe, and the Merkle accumulator from the WAL's committed
-	// records, verifying every chain link before serving. A restart therefore
-	// serves the same head the previous generation served, and a corrupt or
-	// tampered WAL refuses boot (fail-closed) instead of re-anchoring the next
-	// admit on genesis and leaving the WAL permanently unverifiable.
-	st, err := store.Recover(*walPath, store.SystemClock{})
+	// tips, dedupe, and the Merkle accumulator, verifying every chain link
+	// before serving. With a rotated prefix the boot is HOT-ONLY, anchored on
+	// the signed checkpoint — the cold seam is never read at boot (ADR-0045),
+	// so a cold-mount outage cannot take the audit plane down.
+	cp := mgr.Checkpoint()
+	if cp.HasAnchors() {
+		st, err = store.RecoverAnchored(*walPath, store.SystemClock{}, cp.BootAnchor())
+	} else {
+		st, err = store.Recover(*walPath, store.SystemClock{})
+	}
 	if err != nil {
 		return fmt.Errorf("recover wal: %w", err)
 	}
@@ -89,10 +144,6 @@ func run() error {
 	}()
 	log.Printf("ocu-audit: recovered %d committed records from %s", len(st.Records()), *walPath)
 
-	sgn, err := signer.LoadPrivateKey(*signKeyFile)
-	if err != nil {
-		return fmt.Errorf("load sign key: %w", err)
-	}
 	// Sign and write a fresh head IMMEDIATELY after recovery: without this, a
 	// restart leaves the previous generation's head (or a genesis head) on
 	// disk for up to one ticker interval, and the independent verifier
@@ -120,7 +171,13 @@ func run() error {
 	// co-tenant sources. The share is operator-tunable; a non-positive value is
 	// clamped up by the limiter so fairness never silently disables itself.
 	share := ingest.FairnessShare{Burst: *fairnessBurst, RefillEveryMillis: fairnessRefil.Milliseconds()}
-	srv := ingest.NewServerWithFairness(st, authz, ingest.MTLSPeerVerifier{}, share, store.SystemClock{})
+	srv = ingest.NewServerWithFairness(st, authz, ingest.MTLSPeerVerifier{}, share, store.SystemClock{})
+
+	// NFR-SEC-45: an accepted retention-policy change (necessarily a
+	// non-shrink) self-emits a chain-linked record and repins the checkpoint.
+	if err := mgr.BootPolicySync(); err != nil {
+		return fmt.Errorf("retention policy sync: %w", err)
+	}
 
 	httpSrv := &http.Server{
 		Addr:              *listen,
@@ -131,6 +188,22 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Retention cadence (ADR-0045): each tick seals when due, rotates due
+	// segments hot -> cold, and emits breach evidence. Failures inside a tick
+	// never touch admission; they self-emit and retry next tick.
+	go func() {
+		t := time.NewTicker(*retTick)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				mgr.Tick(store.SystemClock{}.NowMillis())
+			}
+		}
+	}()
 
 	// Daily head cadence: sign the head and write the submission envelope.
 	go func() {

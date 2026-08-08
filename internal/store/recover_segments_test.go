@@ -117,12 +117,15 @@ func TestSealActiveSnapshotsCommitState(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	count, size, err := st.SealActive(filepath.Join(dir, wal.SegmentName(1)))
+	snap, err := st.SealActive(filepath.Join(dir, wal.SegmentName(1)))
 	if err != nil {
 		t.Fatalf("SealActive: %v", err)
 	}
-	if count != 3 || size != 3 {
-		t.Fatalf("SealActive snapshot (count=%d, size=%d), want (3, 3)", count, size)
+	if snap.Count != 3 || snap.TreeSize != 3 {
+		t.Fatalf("SealActive snapshot (count=%d, size=%d), want (3, 3)", snap.Count, snap.TreeSize)
+	}
+	if len(snap.Tips) != 1 || snap.Tips["control-plane"].Seq != 3 || len(snap.Frontier) == 0 {
+		t.Fatalf("SealActive anchors wrong: %+v", snap)
 	}
 	// The seal is real: the segment file holds the three records and the
 	// active file starts empty.
@@ -155,7 +158,7 @@ func TestRecoverRefusesAmbiguousSegments(t *testing.T) {
 	if _, err := st.Admit("control-plane", env(1)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.SealActive(filepath.Join(dir, wal.SegmentName(7))); err != nil {
+	if _, err := st.SealActive(filepath.Join(dir, wal.SegmentName(7))); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Close(); err != nil {

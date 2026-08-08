@@ -100,3 +100,23 @@ func TestSaturationSelfEmittedOnPipelineChannel(t *testing.T) {
 			"the over-share was shaped silently, defeating NFR-SEC-56's saturation signal")
 	}
 }
+
+// TestSelfEmitSequenceContinuesAcrossRestart: a recovered store already
+// carries pipeline-channel records; a fresh server must continue that
+// sequence, or its first evidence record regresses and is silently dropped.
+func TestSelfEmitSequenceContinuesAcrossRestart(t *testing.T) {
+	r := newKeystoneRigBare(t)
+	srv1 := NewServerWithFairness(r.store, DefaultAuthz("control-plane"), MTLSPeerVerifier{}, FairnessShare{Burst: 1, RefillEveryMillis: 100}, frozenClock{})
+	srv1.SelfEmit("test.evidence", "subject", map[string]any{"n": 1})
+	if got := r.store.LastSequence("audit-pipeline"); got != 1 {
+		t.Fatalf("first self-emit landed sequence %d, want 1", got)
+	}
+
+	// A second server over the SAME store (the restart model: state survives).
+	srv2 := NewServerWithFairness(r.store, DefaultAuthz("control-plane"), MTLSPeerVerifier{}, FairnessShare{Burst: 1, RefillEveryMillis: 100}, frozenClock{})
+	srv2.SelfEmit("test.evidence", "subject", map[string]any{"n": 2})
+	if got := r.store.LastSequence("audit-pipeline"); got != 2 {
+		t.Fatalf("post-restart self-emit did not land (sequence still %d); the fresh "+
+			"server restarted its sequence at 1 and the evidence was dropped", got)
+	}
+}
