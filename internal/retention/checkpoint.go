@@ -40,6 +40,13 @@ type SegmentEntry struct {
 	// its cold copy was verified complete (0 = still hot).
 	SealedAtMillis  int64 `json:"sealed_at_millis"`
 	RotatedAtMillis int64 `json:"rotated_at_millis"`
+	// SealTips, SealTreeSize, and SealFrontier are the seal-point anchors
+	// (store.SealSnapshot): when THIS segment rotates, they become the
+	// checkpoint's top-level boot anchors. Segments rotate strictly in index
+	// order, so the promotion is well-defined.
+	SealTips     map[string]ChainTip `json:"seal_tips"`
+	SealTreeSize uint64              `json:"seal_tree_size"`
+	SealFrontier [][]byte            `json:"seal_frontier"`
 }
 
 // Checkpoint is the signed retention state (ADR-0045): the declared policy,
@@ -107,6 +114,22 @@ func (c Checkpoint) SignBytes() []byte {
 		u64(s.LastGlobalIndex)
 		i64(s.SealedAtMillis)
 		i64(s.RotatedAtMillis)
+		tipSources := make([]string, 0, len(s.SealTips))
+		for src := range s.SealTips {
+			tipSources = append(tipSources, src)
+		}
+		sort.Strings(tipSources)
+		u64(uint64(len(tipSources)))
+		for _, src := range tipSources {
+			field([]byte(src))
+			field(s.SealTips[src].Hash)
+			u64(s.SealTips[src].Seq)
+		}
+		u64(s.SealTreeSize)
+		u64(uint64(len(s.SealFrontier)))
+		for _, h := range s.SealFrontier {
+			field(h)
+		}
 	}
 
 	sources := make([]string, 0, len(c.ChainTips))

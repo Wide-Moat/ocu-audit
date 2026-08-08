@@ -80,12 +80,26 @@ func tempPattern(segName string) string { return ".rotate-" + segName + "-*" }
 // name, verified, then removes the hot copy. It is safe to re-run after any
 // crash: ResumeSegment first reconciles whatever a previous attempt left.
 func Rotate(fs rotateFS, hotPath, coldDir string) error {
+	if err := RotateCopy(fs, hotPath, coldDir); err != nil {
+		return err
+	}
+	return FinishRotation(fs, hotPath)
+}
+
+// RotateCopy runs the rotation THROUGH the verified rename to the final cold
+// name, leaving the hot copy in place — the pause point where the manager
+// rewrites the checkpoint (rotated + promoted anchors) BEFORE the removal
+// (ADR-0045 ordering). Resume-safe.
+func RotateCopy(fs rotateFS, hotPath, coldDir string) error {
 	segName := filepath.Base(hotPath)
 	if err := ResumeSegment(fs, hotPath, coldDir); err != nil {
 		return err
 	}
 	if _, err := os.Stat(hotPath); errors.Is(err, os.ErrNotExist) {
 		return nil // resume finished the rotation
+	}
+	if _, err := os.Stat(filepath.Join(coldDir, segName)); err == nil {
+		return nil // identical both-copies: cold already complete
 	}
 
 	hotBytes, err := fs.ReadFile(hotPath)
@@ -122,8 +136,15 @@ func Rotate(fs rotateFS, hotPath, coldDir string) error {
 	if err := fs.Rename(tmpPath, finalPath); err != nil {
 		return fmt.Errorf("retention: rename cold temp to final: %w", err)
 	}
-	if err := fs.SyncDir(coldDir); err != nil {
-		return err
+	return fs.SyncDir(coldDir)
+}
+
+// FinishRotation removes the hot copy after the cold copy is verified,
+// renamed, AND checkpointed. A missing hot copy is already-finished, not an
+// error (resume idempotence).
+func FinishRotation(fs rotateFS, hotPath string) error {
+	if _, err := os.Stat(hotPath); errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
 	if err := fs.Remove(hotPath); err != nil {
 		return fmt.Errorf("retention: remove hot copy after verified rotation: %w", err)

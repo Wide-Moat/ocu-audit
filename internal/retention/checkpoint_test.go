@@ -41,6 +41,9 @@ func testCheckpoint(t *testing.T, floorYears int) Checkpoint {
 				RecordCount: 3, FirstIngestMillis: 1000, LastIngestMillis: 3000,
 				FirstGlobalIndex: 0, LastGlobalIndex: 2,
 				SealedAtMillis: 4000, RotatedAtMillis: 5000,
+				SealTips:     map[string]ChainTip{"control-plane": {Hash: bytes.Repeat([]byte{0x05}, 32), Seq: 2}},
+				SealTreeSize: 3,
+				SealFrontier: [][]byte{bytes.Repeat([]byte{0x06}, 32)},
 			},
 			{
 				Name: "audit-000002.wal", SHA256: bytes.Repeat([]byte{0xBB}, 32),
@@ -206,13 +209,19 @@ func TestSignBytesCarriesRetentionTag(t *testing.T) {
 func TestSignBytesBindsEveryAnchorField(t *testing.T) {
 	base := testCheckpoint(t, 7).SignBytes()
 	mutate := map[string]func(*Checkpoint){
-		"segment sha":  func(c *Checkpoint) { c.Segments[0].SHA256[0] ^= 1 },
-		"chain tip":    func(c *Checkpoint) { c.ChainTips["control-plane"].Hash[0] ^= 1 },
-		"tip sequence": func(c *Checkpoint) { t := c.ChainTips["control-plane"]; t.Seq++; c.ChainTips["control-plane"] = t },
-		"tree size":    func(c *Checkpoint) { c.TreeSize++ },
-		"frontier":     func(c *Checkpoint) { c.Frontier[0][0] ^= 1 },
-		"floor":        func(c *Checkpoint) { c.Policy.FloorYears++ },
-		"record count": func(c *Checkpoint) { c.Segments[1].RecordCount++ },
+		"segment sha":    func(c *Checkpoint) { c.Segments[0].SHA256[0] ^= 1 },
+		"chain tip":      func(c *Checkpoint) { c.ChainTips["control-plane"].Hash[0] ^= 1 },
+		"tip sequence":   func(c *Checkpoint) { t := c.ChainTips["control-plane"]; t.Seq++; c.ChainTips["control-plane"] = t },
+		"tree size":      func(c *Checkpoint) { c.TreeSize++ },
+		"frontier":       func(c *Checkpoint) { c.Frontier[0][0] ^= 1 },
+		"floor":          func(c *Checkpoint) { c.Policy.FloorYears++ },
+		"record count":   func(c *Checkpoint) { c.Segments[1].RecordCount++ },
+		"seal tree size": func(c *Checkpoint) { c.Segments[0].SealTreeSize++ },
+		"seal tip": func(c *Checkpoint) {
+			t := c.Segments[0].SealTips["control-plane"]
+			t.Seq++
+			c.Segments[0].SealTips["control-plane"] = t
+		},
 	}
 	for name, mut := range mutate {
 		cp := testCheckpoint(t, 7)

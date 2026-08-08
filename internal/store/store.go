@@ -169,19 +169,41 @@ func (s *Store) Admit(source string, env *ocsf.PublishEnvelope) (*ocsf.Record, e
 	return rec, nil
 }
 
+// SealSnapshot is the commit-order state at a seal point — exactly the
+// anchors a rotation of the sealed prefix will promote into the retention
+// checkpoint (ADR-0045). Captured under the store lock, so it is exact.
+type SealSnapshot struct {
+	// Count and TreeSize are the GLOBAL committed-record count and Merkle
+	// size at the seal.
+	Count    uint64
+	TreeSize uint64
+	// Frontier is the accumulator frontier at the seal.
+	Frontier [][]byte
+	// Tips is each source's last hash+sequence at the seal.
+	Tips map[string]ChainTip
+}
+
 // SealActive seals the active WAL file to sealedPath (ADR-0045): under the
-// store lock it delegates to the WAL seal and returns the committed-record
-// count and Merkle tree size at the seal point — the commit-order snapshot the
-// retention checkpoint records. Admit blocks for the seal's duration, so the
-// snapshot is exact: every record in the sealed segment set is counted, none
-// from after.
-func (s *Store) SealActive(sealedPath string) (count uint64, treeSize uint64, err error) {
+// store lock it delegates to the WAL seal and snapshots the seal-point
+// anchors. Admit blocks for the seal's duration, so the snapshot is exact:
+// every record in the sealed segment set is covered, none from after.
+func (s *Store) SealActive(sealedPath string) (SealSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.w.SealTo(sealedPath); err != nil {
-		return 0, 0, fmt.Errorf("store: seal: %w", err)
+		return SealSnapshot{}, fmt.Errorf("store: seal: %w", err)
 	}
-	return uint64(len(s.records)), s.acc.Size(), nil
+	size, frontier := s.acc.Frontier()
+	tips := make(map[string]ChainTip, len(s.perSourceLastHash))
+	for src, h := range s.perSourceLastHash {
+		tips[src] = ChainTip{Hash: append([]byte(nil), h...), Seq: s.perSourceLastSeq[src]}
+	}
+	return SealSnapshot{
+		Count:    s.globalOffset + uint64(len(s.records)),
+		TreeSize: size,
+		Frontier: frontier,
+		Tips:     tips,
+	}, nil
 }
 
 // Head returns the current Merkle head over all committed records.

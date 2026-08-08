@@ -62,7 +62,7 @@ func newAnchoredRig(t *testing.T) *anchoredRig {
 	admit("egress-edge", 1)
 	admit("control-plane", 2)
 	segName := wal.SegmentName(1)
-	if _, _, err := gen1.SealActive(filepath.Join(hotDir, segName)); err != nil {
+	if _, err := gen1.SealActive(filepath.Join(hotDir, segName)); err != nil {
 		t.Fatal(err)
 	}
 	// Hot remainder: object-store 2, control-plane 3.
@@ -295,7 +295,7 @@ func TestRecoverAnchoredFloorHoldsWithEmptyHot(t *testing.T) {
 		t.Fatal(err)
 	}
 	segName := wal.SegmentName(1)
-	if _, _, err := gen1.SealActive(filepath.Join(hotDir, segName)); err != nil {
+	if _, err := gen1.SealActive(filepath.Join(hotDir, segName)); err != nil {
 		t.Fatal(err)
 	}
 	rec := gen1.Records()[0]
