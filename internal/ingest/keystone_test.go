@@ -32,6 +32,19 @@ type keystoneRig struct {
 
 func newKeystoneRig(t *testing.T) *keystoneRig {
 	t.Helper()
+	r := newKeystoneRigBare(t)
+	// The control-plane peer is also the exec-driver authorized to host-author
+	// the session-sandbox channel (NFR-SEC-47).
+	handler := NewServer(r.store, DefaultAuthz("control-plane"), MTLSPeerVerifier{}).Handler()
+	r.startTLS(t, handler)
+	return r
+}
+
+// newKeystoneRigBare builds the rig's durable pieces (CA, WAL, store, signer)
+// without a running server, so a caller can start its own handler — the default
+// ingest server or the fairness-wired one — over the same CA and store.
+func newKeystoneRigBare(t *testing.T) *keystoneRig {
+	t.Helper()
 	ca := newTestCA(t)
 	walPath := filepath.Join(t.TempDir(), "keystone.wal")
 	w, err := wal.Open(walPath)
@@ -44,26 +57,25 @@ func newKeystoneRig(t *testing.T) *keystoneRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// The control-plane peer is also the exec-driver authorized to host-author
-	// the session-sandbox channel (NFR-SEC-47).
-	authz := DefaultAuthz("control-plane")
-	handler := NewServer(st, authz, MTLSPeerVerifier{}).Handler()
-
-	srv := httptest.NewUnstartedServer(handler)
-	serverCert := ca.leaf(t, "ocu-audit", true)
-	srv.TLS = ServerTLSConfig(serverCert, ca.pool)
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-
 	return &keystoneRig{
-		srv:      srv,
 		ca:       ca,
 		walPath:  walPath,
 		store:    st,
 		signer:   sgn,
 		headPath: filepath.Join(t.TempDir(), "head.json"),
 	}
+}
+
+// startTLS binds handler to a TLS test server over the rig's CA and records it
+// on the rig for clientFor/publish to reach.
+func (r *keystoneRig) startTLS(t *testing.T, handler http.Handler) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(handler)
+	serverCert := r.ca.leaf(t, "ocu-audit", true)
+	srv.TLS = ServerTLSConfig(serverCert, r.ca.pool)
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	r.srv = srv
 }
 
 // clientFor builds an HTTP client that presents the given peer CN's client

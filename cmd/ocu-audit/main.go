@@ -52,6 +52,8 @@ func run() error {
 		execDriverCN  = flag.String("control-exec-driver-cn", "control-plane", "peer CN authorized to host-author the session-sandbox channel (NFR-SEC-47)")
 		headDumpEvery = flag.Duration("head-interval", 24*time.Hour, "daily head cadence")
 		headOut       = flag.String("head-out", "audit-head.json", "signed daily-head output path")
+		fairnessBurst = flag.Int("fairness-burst", 256, "per-source ingest burst capacity (NFR-SEC-56); a source may admit this many events back-to-back before refill governs its rate")
+		fairnessRefil = flag.Duration("fairness-refill", 10*time.Millisecond, "per-source ingest refill interval (NFR-SEC-56): one token restored per interval, so the steady-state share is 1/interval events per second")
 	)
 	flag.Parse()
 
@@ -92,7 +94,12 @@ func run() error {
 	}
 
 	authz := ingest.DefaultAuthz(*execDriverCN)
-	srv := ingest.NewServer(st, authz, ingest.MTLSPeerVerifier{})
+	// Per-source ingest fairness is on by default (NFR-SEC-56): a compromised or
+	// runaway source is rate-shaped, not left to flood the fan-in and dilute
+	// co-tenant sources. The share is operator-tunable; a non-positive value is
+	// clamped up by the limiter so fairness never silently disables itself.
+	share := ingest.FairnessShare{Burst: *fairnessBurst, RefillEveryMillis: fairnessRefil.Milliseconds()}
+	srv := ingest.NewServerWithFairness(st, authz, ingest.MTLSPeerVerifier{}, share, store.SystemClock{})
 
 	httpSrv := &http.Server{
 		Addr:              *listen,
