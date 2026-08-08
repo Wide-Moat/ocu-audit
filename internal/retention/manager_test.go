@@ -47,14 +47,14 @@ type emitRecord struct {
 // SealSnapshot mirrors store.SealSnapshot without importing store.
 // (Defined in manager.go; used here for the fake seam.)
 
-func newManagerRig(t *testing.T, floorYears int) *managerRig {
+func newManagerRig(t *testing.T) *managerRig {
 	t.Helper()
 	hotDir, coldDir := t.TempDir(), t.TempDir()
 	sgn, err := signer.Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := NewPolicy(floorYears, 2160*time.Hour, 24*time.Hour)
+	p, err := NewPolicy(7, 2160*time.Hour, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func (r *managerRig) emitted(action string) int {
 // TestTickSealsWhenDue: with unsealed records present, the first tick past
 // the seal interval seals; a tick just under does not. Literal times.
 func TestTickSealsWhenDue(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 5 // records exist
 
 	// Just under 24h since the (zero) epoch baseline: no seal.
@@ -176,7 +176,7 @@ func TestTickSealsWhenDue(t *testing.T) {
 // TestTickDoesNotSealAnEmptyActive: no new records => no seal, however much
 // time passes (an empty segment would be inventory noise).
 func TestTickDoesNotSealAnEmptyActive(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 0
 	r.m.Tick((48 * time.Hour).Milliseconds())
 	if len(r.sealMade) != 0 {
@@ -201,7 +201,7 @@ func (r *managerRig) loadCheckpoint() Checkpoint {
 // (checkpoint BEFORE hot removal, so a crash between them boots anchored with
 // the segment excluded, never unanchored with it missing).
 func TestTickRotatesDueSegmentAndPromotesAnchors(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 5
 
 	r.m.Tick((24 * time.Hour).Milliseconds()) // seals segment 1
@@ -237,7 +237,7 @@ func TestTickRotatesDueSegmentAndPromotesAnchors(t *testing.T) {
 // segment, leaves the hot copy intact, and does NOT advance the anchors. A
 // later tick with the cold dir healed completes and emits nothing more.
 func TestRotationFailureEmitsAndRetries(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 2 // one segment only; see TestCeilingBreachEmitsOnce
 	r.m.Tick((24 * time.Hour).Milliseconds())
 	segName := filepath.Base(r.sealMade[0])
@@ -277,7 +277,7 @@ func TestRotationFailureEmitsAndRetries(t *testing.T) {
 // TestCeilingBreachEmitsOnce: a segment stuck hot past the 90 d ceiling
 // (rotation kept failing) emits the breach evidence exactly once per episode.
 func TestCeilingBreachEmitsOnce(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	// Exactly the sealed segment's record count: after the first seal the
 	// boundary equals the count, so later ticks mint no fresh segments (a
 	// fresh zero-stamped segment would instantly breach and double the emit).
@@ -300,7 +300,7 @@ func TestCeilingBreachEmitsOnce(t *testing.T) {
 // NFR-SEC-45 policy-change record and repins the checkpoint; an identical
 // policy emits nothing.
 func TestBootPolicySyncEmitsOnChange(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 5
 	r.m.Tick((24 * time.Hour).Milliseconds()) // creates the checkpoint
 
@@ -340,7 +340,7 @@ func (r *managerRig) loadCheckpointWith(p Policy) Checkpoint {
 
 // errInjectedSeal proves a seal failure is surfaced, not swallowed.
 func TestTickSurfacesSealFailure(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 5
 	wantErr := errors.New("seal exploded")
 	r.m.cfg.Seal = func(string) (SealSnapshot, error) { return SealSnapshot{}, wantErr }
@@ -356,7 +356,7 @@ func TestTickSurfacesSealFailure(t *testing.T) {
 // leave the segment cold-only while the checkpoint still anchors before it,
 // and the next boot would refuse or lose the suffix.
 func TestCheckpointFailureLeavesHotCopy(t *testing.T) {
-	r := newManagerRig(t, 7)
+	r := newManagerRig(t)
 	r.currentCount = 2
 	r.m.Tick((24 * time.Hour).Milliseconds()) // seal + checkpoint OK
 	segName := filepath.Base(r.sealMade[0])

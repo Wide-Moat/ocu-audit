@@ -172,7 +172,7 @@ func WriteCheckpoint(path string, c Checkpoint, sgn *signer.Signer) error {
 		return fmt.Errorf("retention: checkpoint temp: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op after a successful rename
+	defer func() { _ = os.Remove(tmpName) }() // no-op after a successful rename
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("retention: checkpoint perms: %w", err)
