@@ -48,6 +48,18 @@ func Convert(line []byte, sequence uint64) (*ocsf.PublishEnvelope, error) {
 	if err := dec.Decode(&e); err != nil {
 		return nil, fmt.Errorf("edgetail: decode access-log line: %w", err)
 	}
+	// Envoy renders an absent operator value as the "-" sentinel (a header
+	// the request never carried, or jwt_authn dynamic metadata on a pre-auth
+	// deny). Normalize it to empty on the ATTRIBUTION fields: a deny
+	// attributed to a session literally named "-" would be a forged-looking
+	// actor (NFR-SEC-43). Request-line fields (method/path/authority) are
+	// always present and stay as-is.
+	if e.SessionID == "-" {
+		e.SessionID = ""
+	}
+	if e.XRequestID == "-" {
+		e.XRequestID = ""
+	}
 	if e.Method == "" && e.Authority == "" && e.XRequestID == "" {
 		return nil, fmt.Errorf("edgetail: line carries none of the pinned fields; the json_format has drifted")
 	}

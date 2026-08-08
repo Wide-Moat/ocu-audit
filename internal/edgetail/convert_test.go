@@ -17,7 +17,12 @@ import (
 
 const allowedLine = `{"start_time":"2026-08-08T10:00:00.123Z","method":"GET","path":"/v1/filestore/objects/abc","authority":"filestore.internal:8443","response_code":200,"response_code_details":"via_upstream","bytes_sent":512,"bytes_received":0,"duration_ms":42,"x_request_id":"req-123","session_id":"sess-9"}`
 
-const deniedLine = `{"start_time":"2026-08-08T10:00:01.000Z","method":"POST","path":"/v1/filestore/objects","authority":"filestore.internal:8443","response_code":401,"response_code_details":"jwt_authn_access_denied","bytes_sent":0,"bytes_received":128,"duration_ms":1,"x_request_id":"req-124","session_id":""}`
+// deniedLine carries session_id "-": ENVOY'S missing-value sentinel, which is
+// what a real pre-auth deny emits for the jwt_authn dynamic-metadata operator
+// (the metadata namespace does not exist before validation succeeds). The
+// converter must normalize it to empty — a fixture with a hand-written ""
+// would green while the live wire attributed denies to a session named "-".
+const deniedLine = `{"start_time":"2026-08-08T10:00:01.000Z","method":"POST","path":"/v1/filestore/objects","authority":"filestore.internal:8443","response_code":401,"response_code_details":"jwt_authn_access_denied","bytes_sent":0,"bytes_received":128,"duration_ms":1,"x_request_id":"req-124","session_id":"-"}`
 
 func TestConvertAllowedConnection(t *testing.T) {
 	env, err := Convert([]byte(allowedLine), 7)
@@ -80,7 +85,8 @@ func TestConvertDeniedConnectionMapsRefusalToFailure(t *testing.T) {
 		t.Fatalf("outcome = %q for a 401 deny", env.Outcome)
 	}
 	if env.SessionID != "" {
-		t.Fatalf("session = %q for a pre-auth deny, want empty (never forged)", env.SessionID)
+		t.Fatalf("session = %q for a pre-auth deny, want empty — the Envoy \"-\" "+
+			"missing-value sentinel must be normalized, never carried as an actor", env.SessionID)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(env.Payload, &payload); err != nil {
