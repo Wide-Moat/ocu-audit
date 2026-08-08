@@ -206,6 +206,24 @@ func (s *Store) SealActive(sealedPath string) (SealSnapshot, error) {
 	}, nil
 }
 
+// GlobalCount returns the global committed-record count: rotated (cold)
+// records plus the hot set. The retention manager's seal decision reads it.
+func (s *Store) GlobalCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.globalOffset + uint64(len(s.records))
+}
+
+// LastSequence returns the last committed sequence for a source (0 if none).
+// The ingest server seeds its self-emit sequence from it so the pipeline's
+// own channel continues across a restart instead of regressing to 1 — a
+// regressed self-emit would be refused and the evidence silently lost.
+func (s *Store) LastSequence(source string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.perSourceLastSeq[source]
+}
+
 // Head returns the current Merkle head over all committed records.
 func (s *Store) Head() ([]byte, uint64, error) {
 	s.mu.Lock()

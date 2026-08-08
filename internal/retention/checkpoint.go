@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Wide-Moat/ocu-audit/internal/signer"
+	"github.com/Wide-Moat/ocu-audit/internal/store"
 )
 
 // checkpointDomainTag scopes the checkpoint's signed form (ADR-0045). The
@@ -234,4 +235,69 @@ func syncDir(dir string) error {
 		return fmt.Errorf("retention: fsync dir %q: %w", dir, serr)
 	}
 	return cerr
+}
+
+// BootAnchor converts the (already signature- and policy-verified) checkpoint
+// into the store's boot anchor: top-level anchors, the rotated-segment name
+// set, and the IngestTime floor spanning the rotated prefix.
+func (c Checkpoint) BootAnchor() store.BootAnchor {
+	tips := make(map[string]store.ChainTip, len(c.ChainTips))
+	for src, t := range c.ChainTips {
+		tips[src] = store.ChainTip{Hash: append([]byte(nil), t.Hash...), Seq: t.Seq}
+	}
+	var rotated []string
+	var floor int64
+	for _, seg := range c.Segments {
+		if seg.RotatedAtMillis == 0 {
+			continue
+		}
+		rotated = append(rotated, seg.Name)
+		if seg.LastIngestMillis > floor {
+			floor = seg.LastIngestMillis
+		}
+	}
+	return store.BootAnchor{
+		ChainTips:       tips,
+		TreeSize:        c.TreeSize,
+		Frontier:        c.Frontier,
+		RotatedSegments: rotated,
+		IngestFloor:     floor,
+	}
+}
+
+// HasAnchors reports whether the checkpoint carries a rotated prefix — the
+// signal boot must anchor rather than read the plain hot union.
+func (c Checkpoint) HasAnchors() bool {
+	if c.TreeSize > 0 {
+		return true
+	}
+	for _, seg := range c.Segments {
+		if seg.RotatedAtMillis != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// AuditCheckpoint loads a checkpoint for the OFFLINE verifier: signature and
+// the NFR-COMP-01 floor minimum, without the boot-side shrink comparison (the
+// verifier has no "configured" policy — the checkpoint IS the declaration it
+// audits).
+func AuditCheckpoint(path string, pinnedPub []byte) (Checkpoint, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied path
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	var sc SignedCheckpoint
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		return Checkpoint{}, fmt.Errorf("retention: unmarshal checkpoint: %w", err)
+	}
+	if err := signer.VerifyMessage(pinnedPub, sc.Checkpoint.SignBytes(), sc.Signature); err != nil {
+		return Checkpoint{}, fmt.Errorf("retention: checkpoint signature: %w", err)
+	}
+	if sc.Checkpoint.Policy.FloorYears < FloorYearsMinimum {
+		return Checkpoint{}, fmt.Errorf("retention: checkpoint pins floor %d y, below the NFR-COMP-01 minimum %d y",
+			sc.Checkpoint.Policy.FloorYears, FloorYearsMinimum)
+	}
+	return sc.Checkpoint, nil
 }

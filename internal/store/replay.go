@@ -4,6 +4,7 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,4 +73,43 @@ func readHotRecordsExcluding(activePath string, exclude map[string]struct{}) ([]
 		return nil, err
 	}
 	return append(out, recs...), nil
+}
+
+// ReadUnion reads the WHOLE horizon for the offline verifier (ADR-0045):
+// cold segments in index order, then the hot union, excluding hot leftovers
+// of segments already rotated (a pending-removal duplicate is byte-compared —
+// identical is fine, divergent is a tamper signal and errors). The daemon
+// never calls this; boot is hot-only.
+func ReadUnion(coldDir, activePath string) ([]*ocsf.Record, error) {
+	coldSegs, err := wal.ListSegments(coldDir)
+	if err != nil {
+		return nil, err
+	}
+	var out []*ocsf.Record
+	coldNames := make(map[string]struct{}, len(coldSegs))
+	for _, seg := range coldSegs {
+		name := filepath.Base(seg)
+		coldNames[name] = struct{}{}
+		recs, err := ReadRawRecords(seg)
+		if err != nil {
+			return nil, fmt.Errorf("store: cold segment %s: %w", name, err)
+		}
+		out = append(out, recs...)
+		// A hot leftover of a rotated segment must byte-match its cold copy.
+		hotPath := filepath.Join(filepath.Dir(activePath), name)
+		if hotBytes, herr := os.ReadFile(hotPath); herr == nil { // #nosec G304 -- verifier-owned tier paths
+			coldBytes, cerr := os.ReadFile(seg) // #nosec G304
+			if cerr != nil {
+				return nil, cerr
+			}
+			if !bytes.Equal(hotBytes, coldBytes) {
+				return nil, fmt.Errorf("store: segment %s diverges between hot and cold copies", name)
+			}
+		}
+	}
+	hot, err := readHotRecordsExcluding(activePath, coldNames)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, hot...), nil
 }

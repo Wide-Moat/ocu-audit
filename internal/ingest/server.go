@@ -87,7 +87,8 @@ type Server struct {
 
 // NewServer builds the ingest handler with fairness disabled.
 func NewServer(st *store.Store, authz *PeerChannelAuthz, v PeerVerifier) *Server {
-	return &Server{store: st, authz: authz, verifier: v}
+	return &Server{store: st, authz: authz, verifier: v,
+		selfEmitSeq: st.LastSequence(selfEmitSource)}
 }
 
 // NewServerWithFairness builds the ingest handler with per-source ingest
@@ -99,6 +100,9 @@ func NewServerWithFairness(st *store.Store, authz *PeerChannelAuthz, v PeerVerif
 		authz:    authz,
 		verifier: v,
 		limiter:  newLimiter(share, clk),
+		// Continue the pipeline's own channel across restarts (a fresh 1
+		// would regress against a recovered store and drop evidence).
+		selfEmitSeq: st.LastSequence(selfEmitSource),
 	}
 }
 
@@ -146,7 +150,10 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	// own channel; co-tenant sources are unaffected (independent buckets).
 	if s.limiter != nil && !s.limiter.admit(source) {
 		if s.limiter.saturationOnset(source) {
-			s.selfEmitSaturation(source)
+			s.SelfEmit(saturationAction, source, map[string]any{
+				"saturated_source": source,
+				"over_share":       s.limiter.OverShare(source),
+			})
 		}
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "ingest share exceeded; retry", http.StatusTooManyRequests)
@@ -185,40 +192,34 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// selfEmitSaturation authors a saturation event on the pipeline's own channel
-// naming the saturated source. It runs on the shaped request's goroutine but
-// out of the admission path (the shaped event itself was not admitted). A
-// failure to self-emit is swallowed: the operator-visible over-share counter
-// still records the saturation, and a self-emit fault must not turn a shaped
-// (retryable) request into a hard error.
+// SelfEmit authors an evidence record on the pipeline's own internally-
+// originated channel (INV-1 holds by the pipeline being the observer):
+// saturation events here, and the retention manager's rotation/breach/policy
+// evidence (ADR-0045, NFR-SEC-45). It runs out of the admission path; a
+// self-emit fault is swallowed — evidence must never turn the triggering
+// operation into a hard error.
 //
-// The saturation PAYLOAD schema is Open-Q #5 — OCSF v1.x ships no saturation
-// class — so the record carries a stable action and names the source, but
-// asserts no OCSF class_uid. Resource holds the saturated source; the payload
-// carries the source and its running over-share count for the operator.
-func (s *Server) selfEmitSaturation(source string) {
+// The payload schemas stay minimal: OCSF v1.x ships no class for these
+// (component-07 Open Question), so records carry a stable action and name
+// their subject in Resource, asserting no OCSF class_uid.
+func (s *Server) SelfEmit(action, resource string, payload map[string]any) {
 	s.selfEmitMu.Lock()
 	s.selfEmitSeq++
 	seq := s.selfEmitSeq
 	s.selfEmitMu.Unlock()
 
-	payload, err := json.Marshal(map[string]any{
-		"saturated_source": source,
-		"over_share":       s.limiter.OverShare(source),
-	})
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
 	env := &ocsf.PublishEnvelope{
 		ActorID:  selfEmitSource,
-		Resource: source,
-		Action:   saturationAction,
+		Resource: resource,
+		Action:   action,
 		Outcome:  ocsf.OutcomeSuccess,
 		Sequence: seq,
-		Payload:  payload,
+		Payload:  raw,
 	}
-	// Host-authored by the pipeline: the source label is the pipeline's own
-	// channel, never a wire peer (INV-1).
 	_, _ = s.store.Admit(selfEmitSource, env)
 }
 

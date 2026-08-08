@@ -49,6 +49,43 @@ go build ./cmd/ocu-audit-verify
 
 A tamper of one WAL byte (record content or framing) makes it exit non-zero.
 
+## Retention (ADR-0045)
+
+Two tiers, on by default (NFR-COMP-01): hot ≤ 90 d, then cold to a ≥ 7-year
+floor. The daemon seals the active WAL daily into `audit-NNNNNN.wal`
+segments, rotates due segments into the cold directory as
+copy-verify-rename, and records the state in a signed checkpoint. Boot never
+reads the cold directory — with a rotated prefix it anchors on the
+checkpoint (chain tips + Merkle frontier), so a cold-mount outage cannot
+take the audit plane down.
+
+1. Run with defaults: cold tier at `<dir of -wal>/cold`, floor 7 y, hot
+   ceiling 90 d, daily seals. Tune with `-cold-dir`,
+   `-retention-floor-years`, `-retention-hot-max`,
+   `-retention-seal-interval`. A floor shrink against the pinned checkpoint
+   refuses boot; lengthening loads and self-emits a chain-linked
+   policy-change record.
+2. On the full shelf, mount the customer WORM store (S3 Object Lock
+   Compliance / Ceph RGW) over the cold directory. OCU ships no WORM
+   client; crashed-attempt temporaries carry attempt-unique dot-names and
+   stay inert if the lock prevents cleanup.
+3. Verify the whole horizon offline:
+
+```
+./ocu-audit-verify -wal audit.wal -cold-dir cold \
+  -checkpoint retention-checkpoint.json -head audit-head.json \
+  -pubkey <hex-ed25519-pubkey>
+```
+
+Chains verify from genesis across the cold→hot boundary; the checkpoint's
+signature, floor, and per-segment digests audit against the directory
+contents. A crash mid-rotation resumes idempotently: a torn temporary is
+discarded, identical hot/cold copies finish the removal, divergent copies
+refuse with both files left as evidence. Rotation failure never blocks
+admission — it self-emits `retention.rotation_failure` (and
+`retention.ceiling_breach` past the hot ceiling) on the pipeline's own
+channel, once per episode.
+
 ## Build and test
 
 ```

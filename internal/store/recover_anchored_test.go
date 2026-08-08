@@ -356,3 +356,52 @@ func TestRecoverAnchoredRefusesMismatchedTip(t *testing.T) {
 			"chain tip; the checkpoint anchor is decorative, not load-bearing")
 	}
 }
+
+// TestReadUnionSpansTiers: the offline reader returns cold-then-hot in commit
+// order, tolerates an identical pending-removal duplicate, and refuses a
+// divergent one.
+func TestReadUnionSpansTiers(t *testing.T) {
+	r := newAnchoredRig(t)
+	union, err := ReadUnion(r.coldDir, r.activePath)
+	if err != nil {
+		t.Fatalf("read union: %v", err)
+	}
+	if len(union) != 6 {
+		t.Fatalf("union has %d records, want 6", len(union))
+	}
+	if _, err := VerifyChainsFromRaw(union); err != nil {
+		t.Fatalf("union does not verify from genesis: %v", err)
+	}
+	if !bytes.Equal(mustHead(t, union), r.wantHead) {
+		t.Fatal("union head != pre-rotation head")
+	}
+
+	// Identical pending-removal duplicate: tolerated, not double-counted.
+	segName := r.anchor.RotatedSegments[0]
+	hotLeftover := filepath.Join(filepath.Dir(r.activePath), segName)
+	if err := copyFile(filepath.Join(r.coldDir, segName), hotLeftover); err != nil {
+		t.Fatal(err)
+	}
+	union2, err := ReadUnion(r.coldDir, r.activePath)
+	if err != nil || len(union2) != 6 {
+		t.Fatalf("union with identical duplicate: %d records, err=%v; want 6, nil", len(union2), err)
+	}
+
+	// Divergent duplicate: refused.
+	if err := os.WriteFile(hotLeftover, []byte("not the same bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadUnion(r.coldDir, r.activePath); err == nil {
+		t.Fatal("a divergent hot leftover of a rotated segment was accepted; " +
+			"tamper between the tiers goes unreported")
+	}
+}
+
+func mustHead(t *testing.T, recs []*ocsf.Record) []byte {
+	t.Helper()
+	h, err := RecomputeHead(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}

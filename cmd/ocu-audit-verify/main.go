@@ -13,12 +13,17 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/Wide-Moat/ocu-audit/internal/merkletree"
+	"github.com/Wide-Moat/ocu-audit/internal/ocsf"
+	"github.com/Wide-Moat/ocu-audit/internal/retention"
 	"github.com/Wide-Moat/ocu-audit/internal/signer"
 	"github.com/Wide-Moat/ocu-audit/internal/store"
 )
@@ -34,6 +39,8 @@ func main() {
 		pubHex      = flag.String("pubkey", "", "pinned Ed25519 public key (hex, 32 bytes)")
 		sampleIndex = flag.Uint64("sample", 0, "record index to prove inclusion for")
 		consistency = flag.Int64("consistency-size", -1, "earlier tree size to prove consistency against (-1 to skip)")
+		coldDir     = flag.String("cold-dir", "", "cold-tier directory (ADR-0045); when set, verification spans the cold+hot union from genesis")
+		cpPath      = flag.String("checkpoint", "", "signed retention checkpoint to audit (signature, floor, inventory vs the cold directory)")
 		showVersion = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
@@ -51,11 +58,50 @@ func main() {
 		fatalf("ocu-audit-verify: decode pubkey: %v", err)
 	}
 
-	// The hot union: sealed segments in index order, then the active file
-	// (ADR-0045 stage 1). A single unsealed WAL reads identically to before.
-	records, err := store.ReadHotRecords(*walPath)
+	// With -cold-dir the verification spans the WHOLE horizon: cold segments
+	// in index order, then the hot union — the genesis-anchored perimeter the
+	// daemon's hot-only boot deliberately does not carry (ADR-0045).
+	// Without it: the hot union alone (a pre-rotation deployment).
+	var records []*ocsf.Record
+	if *coldDir != "" {
+		records, err = store.ReadUnion(*coldDir, *walPath)
+	} else {
+		records, err = store.ReadHotRecords(*walPath)
+	}
 	if err != nil {
 		fatalf("ocu-audit-verify: read wal: %v", err)
+	}
+
+	// Checkpoint audit: signature under the pinned key, the NFR-COMP-01
+	// floor, and every rotated inventory row's digest against the actual cold
+	// segment bytes — the retention declaration must match the directory it
+	// describes.
+	if *cpPath != "" {
+		cp, err := retention.AuditCheckpoint(*cpPath, pinnedPub)
+		if err != nil {
+			fatalf("ocu-audit-verify: checkpoint: %v", err)
+		}
+		if *coldDir == "" {
+			fatalf("ocu-audit-verify: -checkpoint requires -cold-dir (the inventory audits the cold directory)")
+		}
+		for _, seg := range cp.Segments {
+			if seg.RotatedAtMillis == 0 {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(*coldDir, seg.Name)) // #nosec G304 -- operator-supplied dir
+			if err != nil {
+				fatalf("ocu-audit-verify: checkpoint names rotated segment %s but the cold directory lacks it: %v", seg.Name, err)
+			}
+			sum := sha256.Sum256(raw)
+			if !bytes.Equal(sum[:], seg.SHA256) {
+				fatalf("ocu-audit-verify: cold segment %s digest %x does not match the signed inventory %x", seg.Name, sum[:8], seg.SHA256[:8])
+			}
+			recs, err := store.ReadRawRecords(filepath.Join(*coldDir, seg.Name))
+			if err != nil || uint64(len(recs)) != seg.RecordCount {
+				fatalf("ocu-audit-verify: cold segment %s carries %d records, inventory says %d (err=%v)", seg.Name, len(recs), seg.RecordCount, err)
+			}
+		}
+		fmt.Printf("checkpoint ok: floor %d y, %d segments inventoried\n", cp.Policy.FloorYears, len(cp.Segments))
 	}
 
 	headBytes, err := os.ReadFile(*headPath)
