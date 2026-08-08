@@ -23,6 +23,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 )
 
@@ -45,6 +46,9 @@ type WAL struct {
 	w      *bufio.Writer
 	sync   Syncer
 	closed bool
+	// path is the active file's own path, kept so SealTo can rename it and
+	// reopen a fresh active file at the same place.
+	path string
 }
 
 // Open opens (creating if absent) the WAL at path in append mode. The file's
@@ -57,7 +61,55 @@ func Open(path string) (*WAL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open wal %q: %w", path, err)
 	}
-	return &WAL{f: f, w: bufio.NewWriter(f), sync: f}, nil
+	return &WAL{f: f, w: bufio.NewWriter(f), sync: f, path: path}, nil
+}
+
+// SealTo closes the current active file and atomically renames it to
+// sealedPath (same directory), then reopens a fresh active file at the
+// original path (ADR-0045). It holds the append mutex for the whole seal, so
+// a concurrent Append lands wholly in the sealed segment or wholly in the
+// fresh active file — never torn across the boundary, never refused.
+//
+// Order matters for durability: flush + fsync the outgoing file BEFORE the
+// rename (its bytes are durable under the new name), fsync the directory
+// AFTER (the rename itself is durable), and only then reopen. A crash between
+// rename and reopen leaves a sealed segment plus no active file; the next
+// Open creates a fresh active, which is exactly the post-seal state.
+func (w *WAL) SealTo(sealedPath string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return ErrClosed
+	}
+	if err := w.w.Flush(); err != nil {
+		return fmt.Errorf("wal: seal flush: %w", err)
+	}
+	if err := w.sync.Sync(); err != nil {
+		return fmt.Errorf("wal: seal fsync: %w", err)
+	}
+	if err := w.f.Close(); err != nil {
+		return fmt.Errorf("wal: seal close: %w", err)
+	}
+	if err := os.Rename(w.path, sealedPath); err != nil {
+		// The outgoing file is closed; reopen it as the active file again so
+		// the WAL stays usable after a failed rename.
+		if f, rerr := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); rerr == nil { // #nosec G304 -- operator's -wal path
+			w.f, w.w, w.sync = f, bufio.NewWriter(f), f
+		} else {
+			w.closed = true
+		}
+		return fmt.Errorf("wal: seal rename: %w", err)
+	}
+	if err := syncDir(filepath.Dir(sealedPath)); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) // #nosec G304 -- operator's -wal path
+	if err != nil {
+		w.closed = true
+		return fmt.Errorf("wal: reopen active after seal: %w", err)
+	}
+	w.f, w.w, w.sync = f, bufio.NewWriter(f), f
+	return nil
 }
 
 // SetSyncer replaces the durability seam. Intended for fault injection in

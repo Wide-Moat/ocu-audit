@@ -165,6 +165,21 @@ func (s *Store) Admit(source string, env *ocsf.PublishEnvelope) (*ocsf.Record, e
 	return rec, nil
 }
 
+// SealActive seals the active WAL file to sealedPath (ADR-0045): under the
+// store lock it delegates to the WAL seal and returns the committed-record
+// count and Merkle tree size at the seal point — the commit-order snapshot the
+// retention checkpoint records. Admit blocks for the seal's duration, so the
+// snapshot is exact: every record in the sealed segment set is counted, none
+// from after.
+func (s *Store) SealActive(sealedPath string) (count uint64, treeSize uint64, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.w.SealTo(sealedPath); err != nil {
+		return 0, 0, fmt.Errorf("store: seal: %w", err)
+	}
+	return uint64(len(s.records)), s.acc.Size(), nil
+}
+
 // Head returns the current Merkle head over all committed records.
 func (s *Store) Head() ([]byte, uint64, error) {
 	s.mu.Lock()

@@ -22,8 +22,12 @@ import (
 // genesis and leave the WAL permanently unverifiable.
 //
 // An absent WAL is a first boot: an empty store over a freshly created WAL.
+//
+// The record set is the HOT union (ADR-0045 stage 1): sealed segments in index
+// order, then the active file. Verification stays cumulative from genesis over
+// that union; the cold tier and the checkpoint anchor are the next stage.
 func Recover(path string, clk Clock) (*Store, error) {
-	records, err := ReadRawRecords(path)
+	records, err := ReadHotRecords(path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("store: recover: %w", err)
