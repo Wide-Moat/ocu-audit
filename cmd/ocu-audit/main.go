@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Wide-Moat/ocu-audit/internal/fanout"
 	"github.com/Wide-Moat/ocu-audit/internal/ingest"
 	"github.com/Wide-Moat/ocu-audit/internal/retention"
 	"github.com/Wide-Moat/ocu-audit/internal/signer"
@@ -65,6 +66,8 @@ func run() error {
 		retSeal       = flag.Duration("retention-seal-interval", 24*time.Hour, "seal cadence for the active WAL file")
 		retCheckpoint = flag.String("retention-checkpoint", "", "signed retention-checkpoint path; empty derives <dir of -wal>/retention-checkpoint.json")
 		retTick       = flag.Duration("retention-tick", time.Hour, "retention manager tick interval")
+		fanoutSink    = flag.String("fanout-sink", "", "SIEM-bridge sink file (JSON lines; the ADR-0009 opt-in bridge). Empty = no fan-out; the hash-chained WAL stays the authoritative record either way")
+		fanoutTick    = flag.Duration("fanout-tick", 10*time.Second, "fan-out pump tick interval")
 		showVersion   = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
@@ -188,6 +191,31 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Opt-in SIEM-side fan-out (component-07 P7-D1): decoupled from admission,
+	// resumed across restarts by a durable cursor, at-least-once; a cursor
+	// lagging past the rotation boundary is counted and evidenced, never a
+	// reason to stall rotation.
+	if *fanoutSink != "" {
+		sink, err := fanout.NewFileSink(*fanoutSink)
+		if err != nil {
+			return fmt.Errorf("fanout sink: %w", err)
+		}
+		defer func() { _ = sink.Close() }()
+		pump := fanout.NewPump(st, sink, filepath.Join(hotDir, "fanout-cursor.json"), srv.SelfEmit)
+		go func() {
+			t := time.NewTicker(*fanoutTick)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					pump.RunOnce()
+				}
+			}
+		}()
+	}
 
 	// Retention cadence (ADR-0045): each tick seals when due, rotates due
 	// segments hot -> cold, and emits breach evidence. Failures inside a tick
