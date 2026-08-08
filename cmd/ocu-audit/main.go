@@ -30,6 +30,10 @@ import (
 	"github.com/Wide-Moat/ocu-audit/internal/store"
 )
 
+// version is stamped by the release build (-X main.version); "dev" identifies a
+// non-release build in the -version output.
+var version = "dev"
+
 // main is a thin shell: every exit path funnels through run so the deferred WAL
 // close actually runs. log.Fatalf skips defers, and on this component the
 // skipped defer is the durable bus -- an exit that bypasses it can drop records
@@ -53,8 +57,14 @@ func run() error {
 		headOut       = flag.String("head-out", "audit-head.json", "signed daily-head output path")
 		fairnessBurst = flag.Int("fairness-burst", 256, "per-source ingest burst capacity (NFR-SEC-56); a source may admit this many events back-to-back before refill governs its rate")
 		fairnessRefil = flag.Duration("fairness-refill", 10*time.Millisecond, "per-source ingest refill interval (NFR-SEC-56): one token restored per interval, so the steady-state share is 1/interval events per second")
+		showVersion   = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 
 	if *serverCert == "" || *serverKey == "" || *clientCAFile == "" || *signKeyFile == "" {
 		return errors.New("-server-cert, -server-key, -client-ca and -sign-key are required")

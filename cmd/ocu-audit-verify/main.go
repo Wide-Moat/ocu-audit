@@ -23,6 +23,10 @@ import (
 	"github.com/Wide-Moat/ocu-audit/internal/store"
 )
 
+// version is stamped by the release build (-X main.version); "dev" identifies a
+// non-release build in the -version output.
+var version = "dev"
+
 func main() {
 	var (
 		walPath     = flag.String("wal", "audit.wal", "append-only WAL path to verify")
@@ -30,8 +34,14 @@ func main() {
 		pubHex      = flag.String("pubkey", "", "pinned Ed25519 public key (hex, 32 bytes)")
 		sampleIndex = flag.Uint64("sample", 0, "record index to prove inclusion for")
 		consistency = flag.Int64("consistency-size", -1, "earlier tree size to prove consistency against (-1 to skip)")
+		showVersion = flag.Bool("version", false, "print the build version and exit")
 	)
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	if *pubHex == "" {
 		fatalf("ocu-audit-verify: -pubkey (pinned Ed25519 public key, hex) is required")
