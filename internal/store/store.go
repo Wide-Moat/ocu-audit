@@ -206,6 +206,34 @@ func (s *Store) SealActive(sealedPath string) (SealSnapshot, error) {
 	}, nil
 }
 
+// RecordsFrom returns the committed records at GLOBAL indexes >= from, in
+// commit order. A from inside the rotated (cold) prefix returns only the hot
+// records (the caller sees the gap via GlobalOffset) — the store never reads
+// the cold tier.
+func (s *Store) RecordsFrom(from uint64) []*ocsf.Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if from < s.globalOffset {
+		from = s.globalOffset
+	}
+	local := from - s.globalOffset
+	if local >= uint64(len(s.records)) {
+		return nil
+	}
+	out := make([]*ocsf.Record, len(s.records)-int(local))
+	copy(out, s.records[local:])
+	return out
+}
+
+// GlobalOffset returns the number of rotated (cold) records preceding the hot
+// set — the boundary a fan-out cursor lagging past it has permanently missed
+// (the cold tier still holds the records; the SINK does not).
+func (s *Store) GlobalOffset() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.globalOffset
+}
+
 // GlobalCount returns the global committed-record count: rotated (cold)
 // records plus the hot set. The retention manager's seal decision reads it.
 func (s *Store) GlobalCount() uint64 {
