@@ -30,11 +30,11 @@ readonly VENDORED="contracts/audit/audit-fanin.asyncapi.yaml"
 
 # The canon blob OID the vendored copy must equal. Canon: open-computer-use
 # next/v1, contracts/audit/audit-fanin.asyncapi.yaml, version 1.2.0.
-readonly PINNED_CANON_BLOB="aabef0c436412f64811d5f6ace64f0d83fd2fa74"
+readonly PINNED_CANON_BLOB="bb56a7c6ba7300243ad46dc35ff2ec47f7c5f366"
 
 # The canon commit the identity half reads the pinned blob at, so the check is
 # immune to whichever branch the sibling checkout has out.
-readonly CANON_COMMIT="87adf1b484ac9bccc0f6236df5d0b196960592eb"
+readonly CANON_COMMIT="0a5921cdfb090c95f67549eae0bd98fe05a9f23e"
 
 readonly CANON_DIR="${OCU_CANON_DIR:-../open-computer-use}"
 
